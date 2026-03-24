@@ -1,6 +1,7 @@
 #![no_std]
 
-pub mod fee_distribution;
+pub mod bridge_reserve_verifier;
+pub use bridge_reserve_verifier::BridgeReserveVerifier;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, String, Vec};
 
