@@ -11,7 +11,8 @@ pub mod insurance_pool;
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
 
 use liquidity_pool::{
-    DailyBucket, ImpermanentLossResult, LiquidityDepth, PoolMetrics, PoolSnapshot, PoolType,
+    DailyBucket, ImpermanentLossResult, LiquidityDepth as PoolLiquidityDepth, PoolMetrics,
+    PoolSnapshot, PoolType,
 };
 
 #[contracttype]
@@ -96,6 +97,28 @@ pub struct SupplyMismatch {
     pub is_critical: bool,
     pub timestamp: u64,
 }
+
+/// Aggregated liquidity depth for an asset pair across multiple DEX venues.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiquidityDepth {
+    /// Asset pair identifier (for example, "USDC/XLM").
+    pub asset_pair: String,
+    /// Total aggregated liquidity across all reported venues.
+    pub total_liquidity: i128,
+    /// Available liquidity within 0.1 % price impact.
+    pub depth_0_1_pct: i128,
+    /// Available liquidity within 0.5 % price impact.
+    pub depth_0_5_pct: i128,
+    /// Available liquidity within 1 % price impact.
+    pub depth_1_pct: i128,
+    /// Available liquidity within 5 % price impact.
+    pub depth_5_pct: i128,
+    /// Venue names contributing to the aggregate snapshot.
+    pub sources: Vec<String>,
+    /// Ledger timestamp when this aggregate was recorded.
+    pub timestamp: u64,
+}
 /// Permission roles that can be assigned to admin addresses.
 ///
 /// - `SuperAdmin` – all permissions, can manage other roles.
@@ -139,6 +162,12 @@ pub enum DataKey {
     RoleKey(Address),
     /// Global list of all role assignments for enumeration.
     RolesList,
+    /// Current aggregated liquidity depth for an asset pair.
+    LiquidityDepthCurrent(String),
+    /// Historical aggregated liquidity depth snapshots for an asset pair.
+    LiquidityDepthHistory(String),
+    /// Registered asset pairs with liquidity depth data.
+    LiquidityPairs,
 }
 
 #[contract]
@@ -151,7 +180,9 @@ impl BridgeWatchContract {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         let assets: Vec<String> = Vec::new(&env);
-        env.storage().instance().set(&DataKey::MonitoredAssets, &assets);
+        env.storage()
+            .instance()
+            .set(&DataKey::MonitoredAssets, &assets);
     }
 
     /// Submit a health score for a monitored asset.
@@ -223,7 +254,13 @@ impl BridgeWatchContract {
     ///
     /// `caller` must be the contract admin, a `SuperAdmin`, or a
     /// `PriceSubmitter`.
-    pub fn submit_price(env: Env, caller: Address, asset_code: String, price: i128, source: String) {
+    pub fn submit_price(
+        env: Env,
+        caller: Address,
+        asset_code: String,
+        price: i128,
+        source: String,
+    ) {
         Self::check_permission(&env, &caller, AdminRole::PriceSubmitter);
 
         let record = PriceRecord {
@@ -298,7 +335,11 @@ impl BridgeWatchContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
-        let threshold = DeviationThreshold { low_bps, medium_bps, high_bps };
+        let threshold = DeviationThreshold {
+            low_bps,
+            medium_bps,
+            high_bps,
+        };
         env.storage()
             .persistent()
             .set(&DataKey::DeviationThreshold(asset_code), &threshold);
@@ -509,6 +550,161 @@ impl BridgeWatchContract {
         critical
     }
 
+    // -----------------------------------------------------------------------
+    // Multi-DEX liquidity depth tracking (issue #31)
+    // -----------------------------------------------------------------------
+
+    /// Record aggregated liquidity depth for a supported asset pair.
+    ///
+    /// This stores the latest cross-DEX liquidity snapshot as well as
+    /// appending it to the pair's historical series for trend analysis.
+    ///
+    /// Supported Phase 1 pairs are:
+    /// - `USDC/XLM`
+    /// - `EURC/XLM`
+    /// - `PYUSD/XLM`
+    /// - `FOBXX/USDC`
+    ///
+    /// # Panics
+    /// Panics when:
+    /// - the caller is not the contract admin
+    /// - the asset pair is not supported in Phase 1
+    /// - any liquidity value is negative
+    /// - `sources` is empty
+    /// - liquidity depth levels are inconsistent
+    pub fn record_liquidity_depth(
+        env: Env,
+        asset_pair: String,
+        total_liquidity: i128,
+        depth_0_1_pct: i128,
+        depth_0_5_pct: i128,
+        depth_1_pct: i128,
+        depth_5_pct: i128,
+        sources: Vec<String>,
+    ) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        Self::validate_liquidity_depth_input(
+            &env,
+            &asset_pair,
+            total_liquidity,
+            depth_0_1_pct,
+            depth_0_5_pct,
+            depth_1_pct,
+            depth_5_pct,
+            &sources,
+        );
+
+        let record = LiquidityDepth {
+            asset_pair: asset_pair.clone(),
+            total_liquidity,
+            depth_0_1_pct,
+            depth_0_5_pct,
+            depth_1_pct,
+            depth_5_pct,
+            sources,
+            timestamp: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::LiquidityDepthCurrent(asset_pair.clone()), &record);
+
+        let mut history: Vec<LiquidityDepth> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LiquidityDepthHistory(asset_pair.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(record);
+        env.storage().persistent().set(
+            &DataKey::LiquidityDepthHistory(asset_pair.clone()),
+            &history,
+        );
+
+        let mut pairs: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::LiquidityPairs)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut found = false;
+        for pair in pairs.iter() {
+            if pair == asset_pair {
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            pairs.push_back(asset_pair);
+            env.storage()
+                .instance()
+                .set(&DataKey::LiquidityPairs, &pairs);
+        }
+    }
+
+    /// Return the latest aggregated liquidity depth for an asset pair.
+    ///
+    /// Public read access.
+    pub fn get_aggregated_liquidity_depth(
+        env: Env,
+        asset_pair: String,
+    ) -> Option<LiquidityDepth> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LiquidityDepthCurrent(asset_pair))
+    }
+
+    /// Return historical liquidity depth snapshots for an asset pair.
+    ///
+    /// Public read access. Returned records are ordered by insertion time and
+    /// filtered to the inclusive timestamp range `[from_timestamp, to_timestamp]`.
+    pub fn get_liquidity_history(
+        env: Env,
+        asset_pair: String,
+        from_timestamp: u64,
+        to_timestamp: u64,
+    ) -> Vec<LiquidityDepth> {
+        let history: Vec<LiquidityDepth> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LiquidityDepthHistory(asset_pair))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut filtered = Vec::new(&env);
+        for snapshot in history.iter() {
+            if snapshot.timestamp >= from_timestamp && snapshot.timestamp <= to_timestamp {
+                filtered.push_back(snapshot);
+            }
+        }
+
+        filtered
+    }
+
+    /// Return the latest aggregated liquidity depth for all tracked asset pairs.
+    ///
+    /// Public read access.
+    pub fn get_all_liquidity_depths(env: Env) -> Vec<LiquidityDepth> {
+        let pairs: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::LiquidityPairs)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut records = Vec::new(&env);
+        for pair in pairs.iter() {
+            let current: Option<LiquidityDepth> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LiquidityDepthCurrent(pair));
+            if let Some(record) = current {
+                records.push_back(record);
+            }
+        }
+
+        records
+    }
     // Multi-admin role management (issue #25)
     // -----------------------------------------------------------------------
 
@@ -520,8 +716,8 @@ impl BridgeWatchContract {
     pub fn grant_role(env: Env, granter: Address, grantee: Address, role: AdminRole) {
         granter.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        let authorized = granter == admin
-            || Self::has_role_internal(&env, &granter, AdminRole::SuperAdmin);
+        let authorized =
+            granter == admin || Self::has_role_internal(&env, &granter, AdminRole::SuperAdmin);
         if !authorized {
             panic!("only SuperAdmin can grant roles");
         }
@@ -547,7 +743,10 @@ impl BridgeWatchContract {
             .persistent()
             .get(&DataKey::RolesList)
             .unwrap_or_else(|| Vec::new(&env));
-        assignments.push_back(RoleAssignment { address: grantee, role });
+        assignments.push_back(RoleAssignment {
+            address: grantee,
+            role,
+        });
         env.storage()
             .persistent()
             .set(&DataKey::RolesList, &assignments);
@@ -557,8 +756,8 @@ impl BridgeWatchContract {
     pub fn revoke_role(env: Env, revoker: Address, target: Address, role: AdminRole) {
         revoker.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        let authorized = revoker == admin
-            || Self::has_role_internal(&env, &revoker, AdminRole::SuperAdmin);
+        let authorized =
+            revoker == admin || Self::has_role_internal(&env, &revoker, AdminRole::SuperAdmin);
         if !authorized {
             panic!("only SuperAdmin can revoke roles");
         }
@@ -646,6 +845,46 @@ impl BridgeWatchContract {
         false
     }
 
+    fn validate_liquidity_depth_input(
+        env: &Env,
+        asset_pair: &String,
+        total_liquidity: i128,
+        depth_0_1_pct: i128,
+        depth_0_5_pct: i128,
+        depth_1_pct: i128,
+        depth_5_pct: i128,
+        sources: &Vec<String>,
+    ) {
+        if !Self::is_supported_liquidity_pair(env, asset_pair) {
+            panic!("unsupported asset pair");
+        }
+        if total_liquidity < 0
+            || depth_0_1_pct < 0
+            || depth_0_5_pct < 0
+            || depth_1_pct < 0
+            || depth_5_pct < 0
+        {
+            panic!("liquidity values must be non-negative");
+        }
+        if sources.len() == 0 {
+            panic!("at least one liquidity source is required");
+        }
+        if depth_0_1_pct > depth_0_5_pct || depth_0_5_pct > depth_1_pct || depth_1_pct > depth_5_pct
+        {
+            panic!("liquidity depth levels must be non-decreasing");
+        }
+        if depth_5_pct > total_liquidity {
+            panic!("liquidity depth cannot exceed total liquidity");
+        }
+    }
+
+    fn is_supported_liquidity_pair(env: &Env, asset_pair: &String) -> bool {
+        *asset_pair == String::from_str(env, "USDC/XLM")
+            || *asset_pair == String::from_str(env, "EURC/XLM")
+            || *asset_pair == String::from_str(env, "PYUSD/XLM")
+            || *asset_pair == String::from_str(env, "FOBXX/USDC")
+    }
+
     // -----------------------------------------------------------------------
     // Liquidity Pool Monitor
     // -----------------------------------------------------------------------
@@ -684,11 +923,7 @@ impl BridgeWatchContract {
     ///
     /// Returns volume, average depth, price change, fee APR, etc.
     /// for the specified `window_secs` lookback period.
-    pub fn calculate_pool_metrics(
-        env: Env,
-        pool_id: String,
-        window_secs: u64,
-    ) -> PoolMetrics {
+    pub fn calculate_pool_metrics(env: Env, pool_id: String, window_secs: u64) -> PoolMetrics {
         liquidity_pool::calculate_pool_metrics(&env, pool_id, window_secs)
     }
 
@@ -722,7 +957,7 @@ impl BridgeWatchContract {
     ///
     /// Returns reserve amounts, total value locked, and a depth score
     /// from 0 to 100.
-    pub fn get_liquidity_depth(env: Env, pool_id: String) -> LiquidityDepth {
+    pub fn get_liquidity_depth(env: Env, pool_id: String) -> PoolLiquidityDepth {
         liquidity_pool::get_liquidity_depth(&env, pool_id)
     }
 
@@ -761,6 +996,14 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         (env, client, admin)
+    }
+
+    fn liquidity_sources(env: &Env, venues: &[&str]) -> Vec<String> {
+        let mut sources = Vec::new(env);
+        for venue in venues.iter() {
+            sources.push_back(String::from_str(env, venue));
+        }
+        sources
     }
 
     // -----------------------------------------------------------------------
@@ -1115,6 +1358,133 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Multi-DEX liquidity depth tracking tests (issue #31)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_record_liquidity_depth_stores_current_and_history() {
+        let (env, client, _admin) = setup();
+        let pair = String::from_str(&env, "USDC/XLM");
+
+        env.ledger().set_timestamp(1_000_000);
+        client.record_liquidity_depth(
+            &pair,
+            &1_500_000,
+            &100_000,
+            &300_000,
+            &600_000,
+            &1_200_000,
+            &liquidity_sources(&env, &["StellarX", "Phoenix"]),
+        );
+
+        let current = client.get_aggregated_liquidity_depth(&pair).unwrap();
+        assert_eq!(current.asset_pair, pair.clone());
+        assert_eq!(current.total_liquidity, 1_500_000);
+        assert_eq!(current.depth_0_1_pct, 100_000);
+        assert_eq!(current.depth_5_pct, 1_200_000);
+        assert_eq!(current.sources.len(), 2);
+        assert_eq!(current.timestamp, 1_000_000);
+
+        let history = client.get_liquidity_history(&pair, &0, &2_000_000);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0).unwrap(), current);
+    }
+
+    #[test]
+    fn test_get_liquidity_history_filters_by_time_range() {
+        let (env, client, _admin) = setup();
+        let pair = String::from_str(&env, "EURC/XLM");
+
+        for i in 0..3u64 {
+            env.ledger().set_timestamp(1_000_000 + i * 3_600);
+            client.record_liquidity_depth(
+                &pair,
+                &(2_000_000 + i as i128 * 100_000),
+                &(100_000 + i as i128 * 10_000),
+                &(300_000 + i as i128 * 10_000),
+                &(600_000 + i as i128 * 10_000),
+                &(1_500_000 + i as i128 * 10_000),
+                &liquidity_sources(&env, &["SDEX", "Soroswap"]),
+            );
+        }
+
+        let history = client.get_liquidity_history(&pair, &1_003_600, &1_007_200);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.get(0).unwrap().timestamp, 1_003_600);
+        assert_eq!(history.get(1).unwrap().timestamp, 1_007_200);
+    }
+
+    #[test]
+    fn test_get_all_liquidity_depths_returns_latest_per_pair() {
+        let (env, client, _admin) = setup();
+        let usdc_xlm = String::from_str(&env, "USDC/XLM");
+        let fobxx_usdc = String::from_str(&env, "FOBXX/USDC");
+
+        env.ledger().set_timestamp(1_000_000);
+        client.record_liquidity_depth(
+            &usdc_xlm,
+            &1_000_000,
+            &100_000,
+            &250_000,
+            &500_000,
+            &900_000,
+            &liquidity_sources(&env, &["StellarX"]),
+        );
+
+        env.ledger().set_timestamp(1_100_000);
+        client.record_liquidity_depth(
+            &fobxx_usdc,
+            &4_000_000,
+            &300_000,
+            &900_000,
+            &1_500_000,
+            &3_000_000,
+            &liquidity_sources(&env, &["SDEX", "LumenSwap"]),
+        );
+
+        let all_depths = client.get_all_liquidity_depths();
+        assert_eq!(all_depths.len(), 2);
+        assert_eq!(all_depths.get(0).unwrap().asset_pair, usdc_xlm);
+        assert_eq!(all_depths.get(1).unwrap().asset_pair, fobxx_usdc);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_record_liquidity_depth_rejects_unsupported_pair() {
+        let (env, client, _admin) = setup();
+        let pair = String::from_str(&env, "BTC/XLM");
+
+        env.ledger().set_timestamp(1_000_000);
+        client.record_liquidity_depth(
+            &pair,
+            &1_000_000,
+            &100_000,
+            &200_000,
+            &300_000,
+            &400_000,
+            &liquidity_sources(&env, &["Phoenix"]),
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_record_liquidity_depth_rejects_invalid_depth_values() {
+        let (env, client, _admin) = setup();
+        let pair = String::from_str(&env, "PYUSD/XLM");
+
+        env.ledger().set_timestamp(1_000_000);
+        client.record_liquidity_depth(
+            &pair,
+            &500_000,
+            &100_000,
+            &250_000,
+            &400_000,
+            &600_000,
+            &liquidity_sources(&env, &["Phoenix"]),
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Multi-admin role management tests (issue #25)
     // -----------------------------------------------------------------------
 
@@ -1355,10 +1725,7 @@ mod tests {
         );
 
         // Calculate metrics over the last 2 hours
-        let metrics = client.calculate_pool_metrics(
-            &pool_id,
-            &(2 * liquidity_pool::HOUR_SECS),
-        );
+        let metrics = client.calculate_pool_metrics(&pool_id, &(2 * liquidity_pool::HOUR_SECS));
 
         assert_eq!(metrics.data_points, 2);
         assert_eq!(metrics.total_volume, (100_000 + 120_000) * p);
@@ -1372,10 +1739,7 @@ mod tests {
         let (env, client, _admin) = setup();
         let pool_id = String::from_str(&env, "USDC_XLM");
 
-        let metrics = client.calculate_pool_metrics(
-            &pool_id,
-            &liquidity_pool::DAY_SECS,
-        );
+        let metrics = client.calculate_pool_metrics(&pool_id, &liquidity_pool::DAY_SECS);
 
         assert_eq!(metrics.data_points, 0);
         assert_eq!(metrics.total_volume, 0);
@@ -1469,11 +1833,7 @@ mod tests {
         );
 
         // Entry price was 5.0 → 4x price change
-        let result = client.calculate_impermanent_loss(
-            &pool_id,
-            &(5 * p),
-            &(10_000 * p),
-        );
+        let result = client.calculate_impermanent_loss(&pool_id, &(5 * p), &(10_000 * p));
 
         // For a 4x price change, IL ≈ 20%
         // IL = 1 - 2*sqrt(4)/(1+4) = 1 - 4/5 = 0.20 = 20%
@@ -1835,7 +2195,8 @@ mod tests {
 
         // Record snapshots across 7 days
         for day in 0..7u64 {
-            env.ledger().set_timestamp(day * liquidity_pool::DAY_SECS + 100);
+            env.ledger()
+                .set_timestamp(day * liquidity_pool::DAY_SECS + 100);
             client.record_pool_state(
                 &pool_id,
                 &((1_000_000 + day as i128 * 10_000) * p),
@@ -1924,15 +2285,7 @@ mod tests {
         let _p = liquidity_pool::PRECISION;
 
         env.ledger().set_timestamp(1_000_000);
-        client.record_pool_state(
-            &pool_id,
-            &0,
-            &0,
-            &0,
-            &0,
-            &0,
-            &PoolType::Amm,
-        );
+        client.record_pool_state(&pool_id, &0, &0, &0, &0, &0, &PoolType::Amm);
 
         let depth = client.get_liquidity_depth(&pool_id);
         assert_eq!(depth.depth_score, 0);
@@ -1947,12 +2300,7 @@ mod tests {
         let (env, client, _admin) = setup();
         let p = liquidity_pool::PRECISION;
 
-        let pairs = [
-            "USDC_XLM",
-            "EURC_XLM",
-            "PYUSD_XLM",
-            "FOBXX_USDC",
-        ];
+        let pairs = ["USDC_XLM", "EURC_XLM", "PYUSD_XLM", "FOBXX_USDC"];
 
         env.ledger().set_timestamp(1_000_000);
 
@@ -2116,7 +2464,8 @@ mod tests {
 
         // Create buckets for day 0, 1, 2
         for day in 0..3u64 {
-            env.ledger().set_timestamp(day * liquidity_pool::DAY_SECS + 100);
+            env.ledger()
+                .set_timestamp(day * liquidity_pool::DAY_SECS + 100);
             client.record_pool_state(
                 &pool_id,
                 &(1_000_000 * p),
