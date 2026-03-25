@@ -730,7 +730,7 @@ impl GovernanceContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::{Address, Env, String};
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -738,7 +738,7 @@ mod tests {
     fn setup() -> (Env, Address, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(GovernanceContract, ());
+        let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -765,7 +765,7 @@ mod tests {
         env: &Env,
         client: &GovernanceContractClient,
         proposer: &Address,
-        admin: &Address,
+        _admin: &Address,
         ptype: ProposalType,
     ) -> u32 {
         let target = Address::generate(env);
@@ -815,7 +815,7 @@ mod tests {
     fn test_initialize_invalid_quorum() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(GovernanceContract, ());
+        let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin, &100, &200, &10, &10_001, &5100, &100, &false, &2);
@@ -826,7 +826,7 @@ mod tests {
     fn test_initialize_zero_threshold() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(GovernanceContract, ());
+        let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin, &100, &200, &10, &1000, &0, &100, &false, &2);
@@ -1109,7 +1109,7 @@ mod tests {
     fn test_quadratic_voting() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(GovernanceContract, ());
+        let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -1541,7 +1541,7 @@ mod tests {
         // via quadratic voting path
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(GovernanceContract, ());
+        let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
