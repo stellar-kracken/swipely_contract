@@ -77,6 +77,29 @@ pub struct DeviationThreshold {
     pub high_bps: i128,
 }
 
+/// Permission roles that can be assigned to admin addresses.
+///
+/// - `SuperAdmin` – all permissions, can manage other roles.
+/// - `HealthSubmitter` – may call `submit_health()` and `submit_health_batch()`.
+/// - `PriceSubmitter` – may call `submit_price()` only.
+/// - `AssetManager` – may call `register_asset()` only.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdminRole {
+    SuperAdmin,
+    HealthSubmitter,
+    PriceSubmitter,
+    AssetManager,
+}
+
+/// Pairs an address with a single granted role.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleAssignment {
+    pub address: Address,
+    pub role: AdminRole,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -87,6 +110,10 @@ pub enum DataKey {
     DeviationAlert(String),
     /// Admin-configured deviation thresholds for an asset.
     DeviationThreshold(String),
+    /// Roles held by a specific address (Vec<AdminRole>).
+    RoleKey(Address),
+    /// Global list of all role assignments for enumeration.
+    RolesList,
 }
 
 #[contract]
@@ -102,17 +129,21 @@ impl BridgeWatchContract {
         env.storage().instance().set(&DataKey::MonitoredAssets, &assets);
     }
 
-    /// Submit a health score for a monitored asset (admin only)
+    /// Submit a health score for a monitored asset.
+    ///
+    /// `caller` must be the contract admin, a `SuperAdmin`, or a
+    /// `HealthSubmitter`. Backward compatible: the original admin address
+    /// requires no explicit role assignment.
     pub fn submit_health(
         env: Env,
+        caller: Address,
         asset_code: String,
         health_score: u32,
         liquidity_score: u32,
         price_stability_score: u32,
         bridge_uptime_score: u32,
     ) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
+        Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
 
         let record = AssetHealth {
             asset_code: asset_code.clone(),
@@ -128,14 +159,13 @@ impl BridgeWatchContract {
             .set(&DataKey::AssetHealth(asset_code), &record);
     }
 
-    /// Submit health scores for multiple assets in a single transaction (admin only).
+    /// Submit health scores for multiple assets in a single transaction.
     ///
-    /// Accepts a vector of [`HealthScoreBatch`] records and stores each as an
-    /// [`AssetHealth`] entry with a consistent ledger timestamp. A `health_up`
-    /// event is emitted for every updated asset. Maximum batch size is 20 records.
-    pub fn submit_health_batch(env: Env, records: Vec<HealthScoreBatch>) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
+    /// `caller` must be the contract admin, a `SuperAdmin`, or a
+    /// `HealthSubmitter`. Accepts up to 20 records per call, all stamped with
+    /// the same ledger timestamp. A `health_up` event is emitted per asset.
+    pub fn submit_health_batch(env: Env, caller: Address, records: Vec<HealthScoreBatch>) {
+        Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
 
         if records.len() > 20 {
             panic!("batch size exceeds the maximum of 20 records");
@@ -164,10 +194,12 @@ impl BridgeWatchContract {
         }
     }
 
-    /// Submit a price record for an asset (admin only)
-    pub fn submit_price(env: Env, asset_code: String, price: i128, source: String) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
+    /// Submit a price record for an asset.
+    ///
+    /// `caller` must be the contract admin, a `SuperAdmin`, or a
+    /// `PriceSubmitter`.
+    pub fn submit_price(env: Env, caller: Address, asset_code: String, price: i128, source: String) {
+        Self::check_permission(&env, &caller, AdminRole::PriceSubmitter);
 
         let record = PriceRecord {
             asset_code: asset_code.clone(),
@@ -195,10 +227,12 @@ impl BridgeWatchContract {
             .get(&DataKey::PriceRecord(asset_code))
     }
 
-    /// Register a new asset for monitoring (admin only)
-    pub fn register_asset(env: Env, asset_code: String) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
+    /// Register a new asset for monitoring.
+    ///
+    /// `caller` must be the contract admin, a `SuperAdmin`, or an
+    /// `AssetManager`.
+    pub fn register_asset(env: Env, caller: Address, asset_code: String) {
+        Self::check_permission(&env, &caller, AdminRole::AssetManager);
 
         let mut assets: Vec<String> = env
             .storage()
@@ -323,6 +357,144 @@ impl BridgeWatchContract {
         env.storage()
             .persistent()
             .get(&DataKey::DeviationAlert(asset_code))
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-admin role management (issue #25)
+    // -----------------------------------------------------------------------
+
+    /// Grant a role to `grantee` (SuperAdmin or original admin only).
+    ///
+    /// Duplicate grants are silently ignored. The original admin address set
+    /// via `initialize()` is implicitly treated as SuperAdmin and does not
+    /// require an explicit role entry.
+    pub fn grant_role(env: Env, granter: Address, grantee: Address, role: AdminRole) {
+        granter.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let authorized = granter == admin
+            || Self::has_role_internal(&env, &granter, AdminRole::SuperAdmin);
+        if !authorized {
+            panic!("only SuperAdmin can grant roles");
+        }
+
+        let mut roles: Vec<AdminRole> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoleKey(grantee.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        for r in roles.iter() {
+            if r == role {
+                return; // already granted
+            }
+        }
+        roles.push_back(role.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::RoleKey(grantee.clone()), &roles);
+
+        let mut assignments: Vec<RoleAssignment> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RolesList)
+            .unwrap_or_else(|| Vec::new(&env));
+        assignments.push_back(RoleAssignment { address: grantee, role });
+        env.storage()
+            .persistent()
+            .set(&DataKey::RolesList, &assignments);
+    }
+
+    /// Revoke a specific role from `target` (SuperAdmin or original admin only).
+    pub fn revoke_role(env: Env, revoker: Address, target: Address, role: AdminRole) {
+        revoker.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let authorized = revoker == admin
+            || Self::has_role_internal(&env, &revoker, AdminRole::SuperAdmin);
+        if !authorized {
+            panic!("only SuperAdmin can revoke roles");
+        }
+
+        let roles: Vec<AdminRole> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoleKey(target.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut updated: Vec<AdminRole> = Vec::new(&env);
+        for r in roles.iter() {
+            if r != role {
+                updated.push_back(r);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::RoleKey(target.clone()), &updated);
+
+        let assignments: Vec<RoleAssignment> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RolesList)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut updated_assignments: Vec<RoleAssignment> = Vec::new(&env);
+        for a in assignments.iter() {
+            if !(a.address == target && a.role == role) {
+                updated_assignments.push_back(a);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::RolesList, &updated_assignments);
+    }
+
+    /// Return `true` if `address` holds `role`.
+    ///
+    /// Public read — no authorisation required.
+    pub fn has_role(env: Env, address: Address, role: AdminRole) -> bool {
+        Self::has_role_internal(&env, &address, role)
+    }
+
+    /// Return all active role assignments. Public read.
+    pub fn get_admin_roles(env: Env) -> Vec<RoleAssignment> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RolesList)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    /// Verify that `caller` is authorised to perform an operation requiring
+    /// `required_role`. The original admin address always passes. Any address
+    /// with `SuperAdmin` or the specific `required_role` also passes.
+    fn check_permission(env: &Env, caller: &Address, required_role: AdminRole) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if *caller == admin {
+            return;
+        }
+        let has_super = Self::has_role_internal(env, caller, AdminRole::SuperAdmin);
+        let has_required = Self::has_role_internal(env, caller, required_role);
+        if !has_super && !has_required {
+            panic!("unauthorized: caller does not have the required role");
+        }
+    }
+
+    /// Internal role lookup (no auth check).
+    fn has_role_internal(env: &Env, address: &Address, role: AdminRole) -> bool {
+        let roles: Vec<AdminRole> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoleKey(address.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+        for r in roles.iter() {
+            if r == role {
+                return true;
+            }
+        }
+        false
     }
 
     // -----------------------------------------------------------------------
@@ -457,13 +629,13 @@ mod tests {
 
     #[test]
     fn test_price_deviation_below_threshold_returns_none() {
-        let (env, client, _admin) = setup();
+        let (env, client, admin) = setup();
         env.ledger().set_timestamp(1_000_000);
         let asset = String::from_str(&env, "USDC");
         let source = String::from_str(&env, "Stellar DEX");
 
         // Store reference price of 1_000_000 (1 %)
-        client.submit_price(&asset, &1_000_000, &source);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
 
         // 1 % deviation is below the default Low threshold of 2 %
         let result = client.check_price_deviation(&asset, &1_010_000);
@@ -472,12 +644,12 @@ mod tests {
 
     #[test]
     fn test_price_deviation_low_severity() {
-        let (env, client, _admin) = setup();
+        let (env, client, admin) = setup();
         env.ledger().set_timestamp(1_000_000);
         let asset = String::from_str(&env, "USDC");
         let source = String::from_str(&env, "Stellar DEX");
 
-        client.submit_price(&asset, &1_000_000, &source);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
 
         // 3 % deviation → Low severity
         let result = client.check_price_deviation(&asset, &1_030_000);
@@ -489,12 +661,12 @@ mod tests {
 
     #[test]
     fn test_price_deviation_medium_severity() {
-        let (env, client, _admin) = setup();
+        let (env, client, admin) = setup();
         env.ledger().set_timestamp(1_000_000);
         let asset = String::from_str(&env, "USDC");
         let source = String::from_str(&env, "Stellar DEX");
 
-        client.submit_price(&asset, &1_000_000, &source);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
 
         // 7 % deviation → Medium severity
         let result = client.check_price_deviation(&asset, &1_070_000);
@@ -506,12 +678,12 @@ mod tests {
 
     #[test]
     fn test_price_deviation_high_severity() {
-        let (env, client, _admin) = setup();
+        let (env, client, admin) = setup();
         env.ledger().set_timestamp(1_000_000);
         let asset = String::from_str(&env, "USDC");
         let source = String::from_str(&env, "Stellar DEX");
 
-        client.submit_price(&asset, &1_000_000, &source);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
 
         // 15 % deviation → High severity
         let result = client.check_price_deviation(&asset, &1_150_000);
@@ -523,12 +695,12 @@ mod tests {
 
     #[test]
     fn test_get_deviation_alerts_persists_latest() {
-        let (env, client, _admin) = setup();
+        let (env, client, admin) = setup();
         env.ledger().set_timestamp(1_000_000);
         let asset = String::from_str(&env, "USDC");
         let source = String::from_str(&env, "Stellar DEX");
 
-        client.submit_price(&asset, &1_000_000, &source);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
         client.check_price_deviation(&asset, &1_150_000);
 
         let stored = client.get_deviation_alerts(&asset);
@@ -538,14 +710,14 @@ mod tests {
 
     #[test]
     fn test_set_custom_deviation_thresholds() {
-        let (env, client, _admin) = setup();
+        let (env, client, admin) = setup();
         env.ledger().set_timestamp(1_000_000);
         let asset = String::from_str(&env, "USDC");
         let source = String::from_str(&env, "Stellar DEX");
 
         // Custom tight thresholds: Low > 50 bps (0.5 %)
         client.set_deviation_threshold(&asset, &50, &100, &200);
-        client.submit_price(&asset, &1_000_000, &source);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
 
         // 1 % deviation (100 bps) exceeds custom Low threshold of 50 bps
         let result = client.check_price_deviation(&asset, &1_010_000);
@@ -582,7 +754,7 @@ mod tests {
         client.initialize(&admin);
 
         let usdc = String::from_str(&env, "USDC");
-        client.register_asset(&usdc);
+        client.register_asset(&admin, &usdc);
 
         let assets = client.get_monitored_assets();
         assert_eq!(assets.len(), 1);
@@ -599,7 +771,7 @@ mod tests {
         client.initialize(&admin);
 
         let usdc = String::from_str(&env, "USDC");
-        client.submit_health(&usdc, &85, &90, &80, &85);
+        client.submit_health(&admin, &usdc, &85, &90, &80, &85);
 
         let health = client.get_health(&usdc);
         assert!(health.is_some());
@@ -612,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_submit_health_batch_stores_all_records() {
-        let (env, client, _admin) = setup();
+        let (env, client, admin) = setup();
         env.ledger().set_timestamp(1_000_000);
 
         let assets = ["USDC", "EURC", "PYUSD"];
@@ -627,7 +799,7 @@ mod tests {
             });
         }
 
-        client.submit_health_batch(&batch);
+        client.submit_health_batch(&admin, &batch);
 
         for (i, code) in assets.iter().enumerate() {
             let health = client.get_health(&String::from_str(&env, code)).unwrap();
@@ -638,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_submit_health_batch_consistent_timestamps() {
-        let (env, client, _admin) = setup();
+        let (env, client, admin) = setup();
         env.ledger().set_timestamp(5_000_000);
 
         let mut batch = Vec::new(&env);
@@ -657,7 +829,7 @@ mod tests {
             bridge_uptime_score: 70,
         });
 
-        client.submit_health_batch(&batch);
+        client.submit_health_batch(&admin, &batch);
 
         let usdc = client.get_health(&String::from_str(&env, "USDC")).unwrap();
         let eurc = client.get_health(&String::from_str(&env, "EURC")).unwrap();
@@ -668,7 +840,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_submit_health_batch_exceeds_limit() {
-        let (env, client, _admin) = setup();
+        let (env, client, admin) = setup();
 
         let mut batch = Vec::new(&env);
         for _ in 0..21u32 {
@@ -680,7 +852,96 @@ mod tests {
                 bridge_uptime_score: 85,
             });
         }
-        client.submit_health_batch(&batch);
+        client.submit_health_batch(&admin, &batch);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-admin role management tests (issue #25)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_grant_and_check_role() {
+        let (env, client, admin) = setup();
+        let submitter = Address::generate(&env);
+
+        client.grant_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+
+        assert!(client.has_role(&submitter, &AdminRole::HealthSubmitter));
+        assert!(!client.has_role(&submitter, &AdminRole::PriceSubmitter));
+    }
+
+    #[test]
+    fn test_role_holder_can_call_permitted_function() {
+        let (env, client, admin) = setup();
+        let submitter = Address::generate(&env);
+
+        client.grant_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+
+        let usdc = String::from_str(&env, "USDC");
+        client.submit_health(&submitter, &usdc, &80, &80, &80, &80);
+
+        let health = client.get_health(&usdc).unwrap();
+        assert_eq!(health.health_score, 80);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_unauthorized_address_cannot_submit_health() {
+        let (env, client, _admin) = setup();
+        let stranger = Address::generate(&env);
+
+        let usdc = String::from_str(&env, "USDC");
+        client.submit_health(&stranger, &usdc, &80, &80, &80, &80);
+    }
+
+    #[test]
+    fn test_revoke_role_removes_access() {
+        let (env, client, admin) = setup();
+        let submitter = Address::generate(&env);
+
+        client.grant_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+        client.revoke_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+
+        assert!(!client.has_role(&submitter, &AdminRole::HealthSubmitter));
+    }
+
+    #[test]
+    fn test_get_admin_roles_returns_all_assignments() {
+        let (env, client, admin) = setup();
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+
+        client.grant_role(&admin, &addr_a, &AdminRole::PriceSubmitter);
+        client.grant_role(&admin, &addr_b, &AdminRole::AssetManager);
+
+        let roles = client.get_admin_roles();
+        assert_eq!(roles.len(), 2);
+    }
+
+    #[test]
+    fn test_super_admin_can_grant_roles() {
+        let (env, client, admin) = setup();
+        let super_admin = Address::generate(&env);
+        let new_submitter = Address::generate(&env);
+
+        client.grant_role(&admin, &super_admin, &AdminRole::SuperAdmin);
+        client.grant_role(&super_admin, &new_submitter, &AdminRole::PriceSubmitter);
+
+        assert!(client.has_role(&new_submitter, &AdminRole::PriceSubmitter));
+    }
+
+    #[test]
+    fn test_original_admin_can_call_all_functions() {
+        let (env, client, admin) = setup();
+        let usdc = String::from_str(&env, "USDC");
+
+        client.register_asset(&admin, &usdc);
+        client.submit_health(&admin, &usdc, &90, &90, &90, &90);
+        client.submit_price(&admin, &usdc, &1_000_000, &String::from_str(&env, "DEX"));
+
+        assert_eq!(client.get_monitored_assets().len(), 1);
+        assert!(client.get_health(&usdc).is_some());
+        assert!(client.get_price(&usdc).is_some());
     }
 
     // -----------------------------------------------------------------------
