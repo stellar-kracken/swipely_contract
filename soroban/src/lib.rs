@@ -7,6 +7,8 @@ pub mod governance;
 pub mod liquidity_pool;
 #[cfg(test)]
 pub mod insurance_pool;
+pub mod rate_limiter;
+pub mod asset_registry;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
 
@@ -509,6 +511,7 @@ impl BridgeWatchContract {
         critical
     }
 
+    // -----------------------------------------------------------------------
     // Multi-admin role management (issue #25)
     // -----------------------------------------------------------------------
 
