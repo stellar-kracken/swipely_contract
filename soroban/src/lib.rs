@@ -43,6 +43,45 @@ pub struct HealthScoreBatch {
     pub bridge_uptime_score: u32,
 }
 
+/// Configurable weights for health score calculation.
+///
+/// Each weight is expressed as a percentage (0–100). The three weights must
+/// sum to exactly 100. Default weights are: liquidity 30 %, price stability
+/// 40 %, bridge uptime 30 %.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HealthWeights {
+    /// Weight assigned to the liquidity component (default 30).
+    pub liquidity_weight: u32,
+    /// Weight assigned to the price stability component (default 40).
+    pub price_stability_weight: u32,
+    /// Weight assigned to the bridge uptime component (default 30).
+    pub bridge_uptime_weight: u32,
+    /// Methodology version identifier for auditability.
+    pub version: u32,
+}
+
+/// Result of an automated health score calculation.
+///
+/// Returned by `calculate_health_score()` and stored alongside the
+/// `AssetHealth` record when using `submit_calculated_health()`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HealthScoreResult {
+    /// Composite health score (0–100).
+    pub composite_score: u32,
+    /// Liquidity component score that was used (0–100).
+    pub liquidity_score: u32,
+    /// Price stability component score that was used (0–100).
+    pub price_stability_score: u32,
+    /// Bridge uptime component score that was used (0–100).
+    pub bridge_uptime_score: u32,
+    /// Weights that were applied during calculation.
+    pub weights: HealthWeights,
+    /// Ledger timestamp when the calculation was performed.
+    pub timestamp: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PriceRecord {
@@ -174,6 +213,10 @@ pub enum DataKey {
     LiquidityDepthHistory(String),
     /// Registered asset pairs with liquidity depth data.
     LiquidityPairs,
+    /// Configurable health score calculation weights.
+    HealthWeights,
+    /// Latest calculated health score result for an asset.
+    HealthScoreResult(String),
 }
 
 #[contract]
@@ -1107,6 +1150,256 @@ impl BridgeWatchContract {
     /// Get all registered liquidity pool IDs.
     pub fn get_registered_pools(env: Env) -> Vec<String> {
         liquidity_pool::get_registered_pools(&env)
+    }
+
+    // -----------------------------------------------------------------------
+    // Automated health score calculation (issue #26)
+    // -----------------------------------------------------------------------
+
+    /// Set configurable weights used by the automated health score calculation.
+    ///
+    /// `caller` must be the contract admin or a `SuperAdmin`. The three weights
+    /// must each be in the range 0–100 and must sum to exactly 100. The
+    /// `version` field tracks the methodology revision for auditability.
+    ///
+    /// # Panics
+    /// - Caller is not authorised.
+    /// - Any individual weight exceeds 100.
+    /// - The weights do not sum to 100.
+    /// - `version` is 0.
+    pub fn set_health_weights(
+        env: Env,
+        caller: Address,
+        liquidity_weight: u32,
+        price_stability_weight: u32,
+        bridge_uptime_weight: u32,
+        version: u32,
+    ) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let authorized =
+            caller == admin || Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+        if !authorized {
+            panic!("only admin or SuperAdmin can set health weights");
+        }
+
+        Self::validate_weights(liquidity_weight, price_stability_weight, bridge_uptime_weight);
+        if version == 0 {
+            panic!("methodology version must be greater than 0");
+        }
+
+        let weights = HealthWeights {
+            liquidity_weight,
+            price_stability_weight,
+            bridge_uptime_weight,
+            version,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::HealthWeights, &weights);
+
+        env.events()
+            .publish((symbol_short!("wt_set"),), version);
+    }
+
+    /// Return the current health score calculation weights.
+    ///
+    /// Public read access — no authorisation required. Returns the
+    /// admin-configured weights or the defaults (30 / 40 / 30, version 1)
+    /// when none have been explicitly set.
+    pub fn get_health_weights(env: Env) -> HealthWeights {
+        Self::load_health_weights(&env)
+    }
+
+    /// Pure calculation: compute a composite health score from component
+    /// scores using the stored (or default) weights.
+    ///
+    /// This function does **not** store any result on-chain; it is intended
+    /// for off-chain callers that want to preview the score before submitting.
+    ///
+    /// Formula:
+    /// ```text
+    /// composite = (liquidity * liq_w + stability * stab_w + uptime * up_w) / 100
+    /// ```
+    ///
+    /// All input scores must be in the 0–100 range.
+    ///
+    /// # Panics
+    /// - Any input score is greater than 100.
+    pub fn calculate_health_score(
+        env: Env,
+        liquidity_score: u32,
+        price_stability_score: u32,
+        bridge_uptime_score: u32,
+    ) -> HealthScoreResult {
+        Self::validate_score_range(liquidity_score, "liquidity_score");
+        Self::validate_score_range(price_stability_score, "price_stability_score");
+        Self::validate_score_range(bridge_uptime_score, "bridge_uptime_score");
+
+        let weights = Self::load_health_weights(&env);
+        let composite = Self::compute_composite(
+            liquidity_score,
+            price_stability_score,
+            bridge_uptime_score,
+            &weights,
+        );
+
+        HealthScoreResult {
+            composite_score: composite,
+            liquidity_score,
+            price_stability_score,
+            bridge_uptime_score,
+            weights,
+            timestamp: env.ledger().timestamp(),
+        }
+    }
+
+    /// Submit a health score that is **automatically calculated** from the
+    /// supplied component scores using the stored weights.
+    ///
+    /// This is the recommended entry-point for Phase 1 MVP health scoring. It
+    /// combines `calculate_health_score()` with `submit_health()`, storing
+    /// both the `AssetHealth` record and the detailed `HealthScoreResult`.
+    ///
+    /// `caller` must be the contract admin, a `SuperAdmin`, or a
+    /// `HealthSubmitter`. The asset must be registered, active, and not paused.
+    /// All component scores must be in the 0–100 range.
+    ///
+    /// An optional `manual_override` score (0–100) can replace the calculated
+    /// composite score while still recording the underlying calculation for
+    /// transparency.
+    ///
+    /// # Panics
+    /// - Caller is not authorised.
+    /// - Asset is not registered, deregistered, or paused.
+    /// - Any component score is greater than 100.
+    /// - `manual_override` is provided and exceeds 100.
+    pub fn submit_calculated_health(
+        env: Env,
+        caller: Address,
+        asset_code: String,
+        liquidity_score: u32,
+        price_stability_score: u32,
+        bridge_uptime_score: u32,
+        manual_override: Option<u32>,
+    ) {
+        Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
+        let status = Self::load_asset_health(&env, &asset_code);
+        Self::assert_asset_accepting_submissions(&status);
+
+        Self::validate_score_range(liquidity_score, "liquidity_score");
+        Self::validate_score_range(price_stability_score, "price_stability_score");
+        Self::validate_score_range(bridge_uptime_score, "bridge_uptime_score");
+
+        let weights = Self::load_health_weights(&env);
+        let calculated_composite = Self::compute_composite(
+            liquidity_score,
+            price_stability_score,
+            bridge_uptime_score,
+            &weights,
+        );
+
+        let final_score = match manual_override {
+            Some(override_score) => {
+                Self::validate_score_range(override_score, "manual_override");
+                override_score
+            }
+            None => calculated_composite,
+        };
+
+        let timestamp = env.ledger().timestamp();
+
+        let record = AssetHealth {
+            asset_code: asset_code.clone(),
+            health_score: final_score,
+            liquidity_score,
+            price_stability_score,
+            bridge_uptime_score,
+            paused: status.paused,
+            active: status.active,
+            timestamp,
+        };
+
+        let result = HealthScoreResult {
+            composite_score: calculated_composite,
+            liquidity_score,
+            price_stability_score,
+            bridge_uptime_score,
+            weights,
+            timestamp,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AssetHealth(asset_code.clone()), &record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::HealthScoreResult(asset_code.clone()), &result);
+
+        env.events().publish(
+            (symbol_short!("health_up"), asset_code),
+            final_score,
+        );
+    }
+
+    /// Return the latest calculated health score result for an asset.
+    ///
+    /// Public read access — no authorisation required. Returns `None` if no
+    /// calculated score has been submitted for the asset.
+    pub fn get_health_score_result(env: Env, asset_code: String) -> Option<HealthScoreResult> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::HealthScoreResult(asset_code))
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helpers — health score calculation
+    // -----------------------------------------------------------------------
+
+    /// Load stored health weights or return defaults (30 / 40 / 30, v1).
+    fn load_health_weights(env: &Env) -> HealthWeights {
+        env.storage()
+            .instance()
+            .get(&DataKey::HealthWeights)
+            .unwrap_or(HealthWeights {
+                liquidity_weight: 30,
+                price_stability_weight: 40,
+                bridge_uptime_weight: 30,
+                version: 1,
+            })
+    }
+
+    /// Validate that three weights are each ≤ 100 and sum to exactly 100.
+    fn validate_weights(liq: u32, stab: u32, up: u32) {
+        if liq > 100 || stab > 100 || up > 100 {
+            panic!("each weight must be between 0 and 100");
+        }
+        if liq + stab + up != 100 {
+            panic!("weights must sum to 100");
+        }
+    }
+
+    /// Validate that a single score is within the 0–100 range.
+    fn validate_score_range(score: u32, name: &str) {
+        if score > 100 {
+            panic!("{} must be between 0 and 100", name);
+        }
+    }
+
+    /// Compute the weighted-average composite score.
+    ///
+    /// `composite = (liq * liq_w + stab * stab_w + up * up_w) / 100`
+    fn compute_composite(
+        liquidity_score: u32,
+        price_stability_score: u32,
+        bridge_uptime_score: u32,
+        weights: &HealthWeights,
+    ) -> u32 {
+        let weighted_sum = (liquidity_score as u64) * (weights.liquidity_weight as u64)
+            + (price_stability_score as u64) * (weights.price_stability_weight as u64)
+            + (bridge_uptime_score as u64) * (weights.bridge_uptime_weight as u64);
+        (weighted_sum / 100) as u32
     }
 }
 
@@ -2711,5 +3004,266 @@ mod tests {
             &(2 * liquidity_pool::DAY_SECS - 1),
         );
         assert_eq!(buckets.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Automated health score calculation tests (issue #26)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_health_weights_returns_defaults() {
+        let (_env, client, _admin) = setup();
+        let weights = client.get_health_weights();
+        assert_eq!(weights.liquidity_weight, 30);
+        assert_eq!(weights.price_stability_weight, 40);
+        assert_eq!(weights.bridge_uptime_weight, 30);
+        assert_eq!(weights.version, 1);
+    }
+
+    #[test]
+    fn test_set_health_weights_stores_custom_weights() {
+        let (_env, client, admin) = setup();
+        client.set_health_weights(&admin, &20, &50, &30, &2);
+
+        let weights = client.get_health_weights();
+        assert_eq!(weights.liquidity_weight, 20);
+        assert_eq!(weights.price_stability_weight, 50);
+        assert_eq!(weights.bridge_uptime_weight, 30);
+        assert_eq!(weights.version, 2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_health_weights_rejects_non_admin() {
+        let (env, client, _admin) = setup();
+        let stranger = Address::generate(&env);
+        client.set_health_weights(&stranger, &30, &40, &30, &1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_health_weights_rejects_invalid_sum() {
+        let (_env, client, admin) = setup();
+        // Weights sum to 90, not 100
+        client.set_health_weights(&admin, &30, &30, &30, &1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_health_weights_rejects_weight_over_100() {
+        let (_env, client, admin) = setup();
+        client.set_health_weights(&admin, &110, &0, &0, &1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_health_weights_rejects_zero_version() {
+        let (_env, client, admin) = setup();
+        client.set_health_weights(&admin, &30, &40, &30, &0);
+    }
+
+    #[test]
+    fn test_calculate_health_score_default_weights() {
+        let (env, client, _admin) = setup();
+        env.ledger().set_timestamp(1_000_000);
+
+        // liq=80, stab=90, up=70 → (80*30 + 90*40 + 70*30) / 100 = (2400+3600+2100)/100 = 81
+        let result = client.calculate_health_score(&80, &90, &70);
+        assert_eq!(result.composite_score, 81);
+        assert_eq!(result.liquidity_score, 80);
+        assert_eq!(result.price_stability_score, 90);
+        assert_eq!(result.bridge_uptime_score, 70);
+        assert_eq!(result.weights.liquidity_weight, 30);
+        assert_eq!(result.weights.price_stability_weight, 40);
+        assert_eq!(result.weights.bridge_uptime_weight, 30);
+        assert_eq!(result.timestamp, 1_000_000);
+    }
+
+    #[test]
+    fn test_calculate_health_score_custom_weights() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(2_000_000);
+
+        // Set custom weights: 50/30/20
+        client.set_health_weights(&admin, &50, &30, &20, &2);
+
+        // liq=60, stab=80, up=100 → (60*50 + 80*30 + 100*20) / 100 = (3000+2400+2000)/100 = 74
+        let result = client.calculate_health_score(&60, &80, &100);
+        assert_eq!(result.composite_score, 74);
+        assert_eq!(result.weights.version, 2);
+    }
+
+    #[test]
+    fn test_calculate_health_score_all_perfect() {
+        let (_env, client, _admin) = setup();
+
+        let result = client.calculate_health_score(&100, &100, &100);
+        assert_eq!(result.composite_score, 100);
+    }
+
+    #[test]
+    fn test_calculate_health_score_all_zero() {
+        let (_env, client, _admin) = setup();
+
+        let result = client.calculate_health_score(&0, &0, &0);
+        assert_eq!(result.composite_score, 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_calculate_health_score_rejects_score_over_100() {
+        let (_env, client, _admin) = setup();
+        client.calculate_health_score(&101, &90, &80);
+    }
+
+    #[test]
+    fn test_submit_calculated_health_stores_records() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(3_000_000);
+
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+
+        client.submit_calculated_health(&admin, &usdc, &80, &90, &70, &None);
+
+        // Check AssetHealth record
+        let health = client.get_health(&usdc).unwrap();
+        // (80*30 + 90*40 + 70*30) / 100 = 81
+        assert_eq!(health.health_score, 81);
+        assert_eq!(health.liquidity_score, 80);
+        assert_eq!(health.price_stability_score, 90);
+        assert_eq!(health.bridge_uptime_score, 70);
+        assert_eq!(health.timestamp, 3_000_000);
+
+        // Check HealthScoreResult record
+        let result = client.get_health_score_result(&usdc).unwrap();
+        assert_eq!(result.composite_score, 81);
+        assert_eq!(result.weights.liquidity_weight, 30);
+        assert_eq!(result.timestamp, 3_000_000);
+    }
+
+    #[test]
+    fn test_submit_calculated_health_with_manual_override() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(4_000_000);
+
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+
+        // Override with manual score of 95
+        client.submit_calculated_health(&admin, &usdc, &80, &90, &70, &Some(95));
+
+        // AssetHealth should have the overridden score
+        let health = client.get_health(&usdc).unwrap();
+        assert_eq!(health.health_score, 95);
+
+        // HealthScoreResult should still have the calculated composite
+        let result = client.get_health_score_result(&usdc).unwrap();
+        assert_eq!(result.composite_score, 81);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_submit_calculated_health_rejects_override_over_100() {
+        let (env, client, admin) = setup();
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+        client.submit_calculated_health(&admin, &usdc, &80, &90, &70, &Some(101));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_submit_calculated_health_rejects_unregistered_asset() {
+        let (env, client, admin) = setup();
+        let usdc = String::from_str(&env, "USDC");
+        client.submit_calculated_health(&admin, &usdc, &80, &90, &70, &None);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_submit_calculated_health_rejects_paused_asset() {
+        let (env, client, admin) = setup();
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+        client.pause_asset(&admin, &usdc);
+        client.submit_calculated_health(&admin, &usdc, &80, &90, &70, &None);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_submit_calculated_health_rejects_unauthorized() {
+        let (env, client, admin) = setup();
+        let stranger = Address::generate(&env);
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+        client.submit_calculated_health(&stranger, &usdc, &80, &90, &70, &None);
+    }
+
+    #[test]
+    fn test_submit_calculated_health_with_role() {
+        let (env, client, admin) = setup();
+        let submitter = Address::generate(&env);
+        client.grant_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+
+        client.submit_calculated_health(&submitter, &usdc, &75, &85, &95, &None);
+
+        let health = client.get_health(&usdc).unwrap();
+        // (75*30 + 85*40 + 95*30) / 100 = (2250+3400+2850)/100 = 85
+        assert_eq!(health.health_score, 85);
+    }
+
+    #[test]
+    fn test_set_health_weights_by_super_admin() {
+        let (env, client, admin) = setup();
+        let super_admin = Address::generate(&env);
+        client.grant_role(&admin, &super_admin, &AdminRole::SuperAdmin);
+
+        client.set_health_weights(&super_admin, &40, &40, &20, &3);
+
+        let weights = client.get_health_weights();
+        assert_eq!(weights.liquidity_weight, 40);
+        assert_eq!(weights.price_stability_weight, 40);
+        assert_eq!(weights.bridge_uptime_weight, 20);
+        assert_eq!(weights.version, 3);
+    }
+
+    #[test]
+    fn test_get_health_score_result_returns_none_for_unknown_asset() {
+        let (env, client, _admin) = setup();
+        let unknown = String::from_str(&env, "UNKNOWN");
+        assert!(client.get_health_score_result(&unknown).is_none());
+    }
+
+    #[test]
+    fn test_submit_calculated_health_updates_on_second_call() {
+        let (env, client, admin) = setup();
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+
+        env.ledger().set_timestamp(1_000_000);
+        client.submit_calculated_health(&admin, &usdc, &80, &90, &70, &None);
+        let first = client.get_health(&usdc).unwrap();
+        assert_eq!(first.health_score, 81);
+
+        env.ledger().set_timestamp(2_000_000);
+        client.submit_calculated_health(&admin, &usdc, &60, &70, &50, &None);
+        let second = client.get_health(&usdc).unwrap();
+        // (60*30 + 70*40 + 50*30) / 100 = (1800+2800+1500)/100 = 61
+        assert_eq!(second.health_score, 61);
+        assert_eq!(second.timestamp, 2_000_000);
+    }
+
+    #[test]
+    fn test_calculate_health_score_edge_weights() {
+        let (_env, client, admin) = setup();
+
+        // Set weights to 0/100/0 — only price stability matters
+        client.set_health_weights(&admin, &0, &100, &0, &4);
+
+        let result = client.calculate_health_score(&0, &88, &0);
+        assert_eq!(result.composite_score, 88);
     }
 }
