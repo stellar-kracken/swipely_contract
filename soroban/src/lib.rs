@@ -1,10 +1,14 @@
 #![no_std]
 
+// governance and insurance_pool are standalone contracts — only compiled for
+// tests (native target) to avoid Wasm symbol conflicts with BridgeWatchContract.
+#[cfg(test)]
 pub mod governance;
 pub mod liquidity_pool;
+#[cfg(test)]
 pub mod insurance_pool;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
 
 use liquidity_pool::{
     DailyBucket, ImpermanentLossResult, LiquidityDepth, PoolMetrics, PoolSnapshot, PoolType,
