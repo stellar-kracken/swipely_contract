@@ -5,12 +5,17 @@
 #[cfg(test)]
 pub mod governance;
 pub mod liquidity_pool;
+pub mod reputation_system;
+pub mod multisig_treasury;
 #[cfg(test)]
 pub mod insurance_pool;
 #[cfg(test)]
 pub mod rate_limiter;
 #[cfg(test)]
 pub mod asset_registry;
+pub mod analytics_aggregator;
+#[cfg(test)]
+pub mod circuit_breaker;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
 
@@ -213,10 +218,8 @@ pub enum DataKey {
     LiquidityDepthHistory(String),
     /// Registered asset pairs with liquidity depth data.
     LiquidityPairs,
-    /// Configurable health score calculation weights.
-    HealthWeights,
-    /// Latest calculated health score result for an asset.
-    HealthScoreResult(String),
+    /// Historical price records for an asset (Vec<PriceRecord>).
+    PriceHistory(String),
 }
 
 #[contract]
@@ -265,7 +268,10 @@ impl BridgeWatchContract {
 
         env.storage()
             .persistent()
-            .set(&DataKey::AssetHealth(asset_code), &record);
+            .set(&DataKey::AssetHealth(asset_code.clone()), &record);
+
+        env.events()
+            .publish((symbol_short!("health_up"), asset_code), health_score);
     }
 
     /// Submit health scores for multiple assets in a single transaction.
@@ -311,7 +317,9 @@ impl BridgeWatchContract {
     /// Submit a price record for an asset.
     ///
     /// `caller` must be the contract admin, a `SuperAdmin`, or a
-    /// `PriceSubmitter`.
+    /// `PriceSubmitter`. The record is stored as the latest price and
+    /// also appended to the asset's historical price series for
+    /// time-range queries via [`get_price_history`].
     pub fn submit_price(
         env: Env,
         caller: Address,
@@ -332,7 +340,10 @@ impl BridgeWatchContract {
 
         env.storage()
             .persistent()
-            .set(&DataKey::PriceRecord(asset_code), &record);
+            .set(&DataKey::PriceRecord(asset_code.clone()), &record);
+
+        env.events()
+            .publish((symbol_short!("price_up"), asset_code), price);
     }
 
     /// Get the latest health record for an asset
@@ -500,7 +511,10 @@ impl BridgeWatchContract {
         };
         env.storage()
             .persistent()
-            .set(&DataKey::DeviationThreshold(asset_code), &threshold);
+            .set(&DataKey::DeviationThreshold(asset_code.clone()), &threshold);
+
+        env.events()
+            .publish((symbol_short!("thresh_up"), asset_code), low_bps);
     }
 
     /// Compare `current_price` against the last recorded [`PriceRecord`] for
@@ -569,7 +583,10 @@ impl BridgeWatchContract {
 
         env.storage()
             .persistent()
-            .set(&DataKey::DeviationAlert(asset_code), &alert);
+            .set(&DataKey::DeviationAlert(asset_code.clone()), &alert);
+
+        env.events()
+            .publish((symbol_short!("price_dev"), asset_code), deviation_bps);
 
         Some(alert)
     }
@@ -597,6 +614,9 @@ impl BridgeWatchContract {
         env.storage()
             .instance()
             .set(&DataKey::MismatchThreshold, &threshold_bps);
+
+        env.events()
+            .publish((symbol_short!("thresh_up"), symbol_short!("mismatch")), threshold_bps);
     }
 
     /// Record a supply mismatch for a bridge asset (admin only).
@@ -669,11 +689,14 @@ impl BridgeWatchContract {
             }
         }
         if !found {
-            bridge_ids.push_back(bridge_id);
+            bridge_ids.push_back(bridge_id.clone());
             env.storage()
                 .instance()
                 .set(&DataKey::BridgeIds, &bridge_ids);
         }
+
+        env.events()
+            .publish((symbol_short!("supply_mm"), bridge_id), mismatch_bps);
     }
 
     /// Return all recorded supply mismatches for a bridge. Public read access.
@@ -795,11 +818,14 @@ impl BridgeWatchContract {
         }
 
         if !found {
-            pairs.push_back(asset_pair);
+            pairs.push_back(asset_pair.clone());
             env.storage()
                 .instance()
                 .set(&DataKey::LiquidityPairs, &pairs);
         }
+
+        env.events()
+            .publish((symbol_short!("liq_chg"), asset_pair), total_liquidity);
     }
 
     /// Return the latest aggregated liquidity depth for an asset pair.
@@ -902,12 +928,15 @@ impl BridgeWatchContract {
             .get(&DataKey::RolesList)
             .unwrap_or_else(|| Vec::new(&env));
         assignments.push_back(RoleAssignment {
-            address: grantee,
-            role,
+            address: grantee.clone(),
+            role: role.clone(),
         });
         env.storage()
             .persistent()
             .set(&DataKey::RolesList, &assignments);
+
+        env.events()
+            .publish((symbol_short!("role_grnt"), grantee), role);
     }
 
     /// Revoke a specific role from `target` (SuperAdmin or original admin only).
@@ -951,6 +980,9 @@ impl BridgeWatchContract {
         env.storage()
             .persistent()
             .set(&DataKey::RolesList, &updated_assignments);
+
+        env.events()
+            .publish((symbol_short!("role_revk"), target), role);
     }
 
     /// Return `true` if `address` holds `role`.
@@ -1407,8 +1439,9 @@ impl BridgeWatchContract {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::Events;
     use soroban_sdk::testutils::Ledger;
-    use soroban_sdk::Env;
+    use soroban_sdk::{Env, IntoVal};
 
     /// Helper: set up a fresh contract with an admin, returning (env, client, admin).
     fn setup() -> (Env, BridgeWatchContractClient<'static>, Address) {
@@ -1654,6 +1687,145 @@ mod tests {
         let m = client.get_supply_mismatches(&bridge).get(0).unwrap();
         assert_eq!(m.mismatch_bps, 0);
         assert!(!m.is_critical);
+    }
+
+    // -----------------------------------------------------------------------
+    // Event emission tests (issue #29)
+    // -----------------------------------------------------------------------
+
+    /// Helper: verify that the contract emitted at least one event whose
+    /// first topic matches the given symbol.
+    fn assert_has_event(env: &Env, contract: &Address, expected_topic: soroban_sdk::Symbol) {
+        let events = env.events().all();
+        let mut found = false;
+        for i in 0..events.len() {
+            let (addr, topics, _data) = events.get(i).unwrap();
+            if addr == *contract && topics.len() > 0 {
+                // The first topic is the event symbol stored as a Val;
+                // convert via IntoVal for comparison.
+                let topic_val: soroban_sdk::Val = topics.get(0).unwrap();
+                let expected_val: soroban_sdk::Val = expected_topic.into_val(env);
+                if topic_val.get_payload() == expected_val.get_payload() {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "expected event with topic not found");
+    }
+
+    #[test]
+    fn test_submit_health_emits_event() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(1_000_000);
+        let asset = String::from_str(&env, "USDC");
+
+        client.register_asset(&admin, &asset);
+        client.submit_health(&admin, &asset, &85, &90, &80, &75);
+
+        assert_has_event(&env, &client.address, symbol_short!("health_up"));
+    }
+
+    #[test]
+    fn test_submit_price_emits_event() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(1_000_000);
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "Stellar DEX");
+
+        client.register_asset(&admin, &asset);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
+
+        assert_has_event(&env, &client.address, symbol_short!("price_up"));
+    }
+
+    #[test]
+    fn test_check_price_deviation_emits_event_on_alert() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(1_000_000);
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "Stellar DEX");
+
+        client.register_asset(&admin, &asset);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
+
+        // 15 % deviation → High severity triggers event
+        let result = client.check_price_deviation(&asset, &1_150_000);
+        assert!(result.is_some());
+
+        assert_has_event(&env, &client.address, symbol_short!("price_dev"));
+    }
+
+    #[test]
+    fn test_record_supply_mismatch_emits_event() {
+        let (env, client, _admin) = setup();
+        env.ledger().set_timestamp(1_000_000);
+
+        let bridge = String::from_str(&env, "CIRCLE_USDC");
+        let asset = String::from_str(&env, "USDC");
+
+        client.record_supply_mismatch(&bridge, &asset, &1_000_000, &1_002_000);
+
+        assert_has_event(&env, &client.address, symbol_short!("supply_mm"));
+    }
+
+    #[test]
+    fn test_record_liquidity_depth_emits_event() {
+        let (env, client, _admin) = setup();
+        let pair = String::from_str(&env, "USDC/XLM");
+
+        env.ledger().set_timestamp(1_000_000);
+        client.record_liquidity_depth(
+            &pair,
+            &1_500_000,
+            &100_000,
+            &300_000,
+            &600_000,
+            &1_200_000,
+            &liquidity_sources(&env, &["StellarX", "Phoenix"]),
+        );
+
+        assert_has_event(&env, &client.address, symbol_short!("liq_chg"));
+    }
+
+    #[test]
+    fn test_grant_role_emits_event() {
+        let (env, client, admin) = setup();
+        let submitter = Address::generate(&env);
+
+        client.grant_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+
+        assert_has_event(&env, &client.address, symbol_short!("role_grnt"));
+    }
+
+    #[test]
+    fn test_revoke_role_emits_event() {
+        let (env, client, admin) = setup();
+        let submitter = Address::generate(&env);
+
+        client.grant_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+        client.revoke_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+
+        assert_has_event(&env, &client.address, symbol_short!("role_revk"));
+    }
+
+    #[test]
+    fn test_set_deviation_threshold_emits_event() {
+        let (env, client, _admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+
+        client.set_deviation_threshold(&asset, &50, &100, &200);
+
+        assert_has_event(&env, &client.address, symbol_short!("thresh_up"));
+    }
+
+    #[test]
+    fn test_set_mismatch_threshold_emits_event() {
+        let (env, client, _admin) = setup();
+
+        client.set_mismatch_threshold(&5);
+
+        assert_has_event(&env, &client.address, symbol_short!("thresh_up"));
     }
 
     // -----------------------------------------------------------------------
