@@ -176,6 +176,8 @@ pub enum DataKey {
     LiquidityDepthHistory(String),
     /// Registered asset pairs with liquidity depth data.
     LiquidityPairs,
+    /// Historical price records for an asset (Vec<PriceRecord>).
+    PriceHistory(String),
 }
 
 #[contract]
@@ -270,7 +272,9 @@ impl BridgeWatchContract {
     /// Submit a price record for an asset.
     ///
     /// `caller` must be the contract admin, a `SuperAdmin`, or a
-    /// `PriceSubmitter`.
+    /// `PriceSubmitter`. The record is stored as the latest price and
+    /// also appended to the asset's historical price series for
+    /// time-range queries via [`get_price_history`].
     pub fn submit_price(
         env: Env,
         caller: Address,
@@ -291,7 +295,95 @@ impl BridgeWatchContract {
 
         env.storage()
             .persistent()
-            .set(&DataKey::PriceRecord(asset_code), &record);
+            .set(&DataKey::PriceRecord(asset_code.clone()), &record);
+
+        // Append to historical price series
+        let mut history: Vec<PriceRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PriceHistory(asset_code.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PriceHistory(asset_code), &history);
+    }
+
+    /// Retrieve historical price records for an asset within a time range.
+    ///
+    /// Returns up to `limit` records (capped at 100) whose timestamps fall
+    /// within the inclusive range `[start_time, end_time]`, sorted by
+    /// timestamp in **descending** order (newest first). Use the `offset`
+    /// parameter for pagination through large result sets.
+    ///
+    /// # Parameters
+    /// - `asset_code` – asset identifier (e.g. `"USDC"`).
+    /// - `start_time` – inclusive lower bound of the query window.
+    /// - `end_time` – inclusive upper bound of the query window.
+    /// - `limit` – maximum number of records to return (clamped to 100).
+    /// - `offset` – number of matching records to skip (for pagination).
+    ///
+    /// # Panics
+    /// Panics when `start_time > end_time`.
+    pub fn get_price_history(
+        env: Env,
+        asset_code: String,
+        start_time: u64,
+        end_time: u64,
+        limit: u32,
+        offset: u32,
+    ) -> Vec<PriceRecord> {
+        if start_time > end_time {
+            panic!("start_time must be less than or equal to end_time");
+        }
+
+        let max_limit: u32 = 100;
+        let effective_limit = if limit == 0 || limit > max_limit {
+            max_limit
+        } else {
+            limit
+        };
+
+        let history: Vec<PriceRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PriceHistory(asset_code))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Collect matching records into a temporary vector
+        let mut matched: Vec<PriceRecord> = Vec::new(&env);
+        for record in history.iter() {
+            if record.timestamp >= start_time && record.timestamp <= end_time {
+                matched.push_back(record);
+            }
+        }
+
+        // Reverse to achieve descending timestamp order (newest first)
+        let total = matched.len();
+        let mut descending: Vec<PriceRecord> = Vec::new(&env);
+        let mut i = total;
+        while i > 0 {
+            i -= 1;
+            descending.push_back(matched.get(i).unwrap());
+        }
+
+        // Apply offset and limit for pagination
+        let mut result: Vec<PriceRecord> = Vec::new(&env);
+        let mut skipped: u32 = 0;
+        let mut collected: u32 = 0;
+        for record in descending.iter() {
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if collected >= effective_limit {
+                break;
+            }
+            result.push_back(record);
+            collected += 1;
+        }
+
+        result
     }
 
     /// Get the latest health record for an asset
@@ -1363,6 +1455,159 @@ mod tests {
         let m = client.get_supply_mismatches(&bridge).get(0).unwrap();
         assert_eq!(m.mismatch_bps, 0);
         assert!(!m.is_critical);
+    }
+
+    // -----------------------------------------------------------------------
+    // Historical price query tests (issue #22)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_price_history_returns_records_in_time_range() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "Stellar DEX");
+
+        client.register_asset(&admin, &asset);
+
+        for i in 0..5u64 {
+            env.ledger().set_timestamp(1_000_000 + i * 3_600);
+            client.submit_price(
+                &admin,
+                &asset,
+                &(1_000_000 + i as i128 * 1_000),
+                &source,
+            );
+        }
+
+        // Query middle range – timestamps 1_003_600 to 1_010_800
+        let history = client.get_price_history(&asset, &1_003_600, &1_010_800, &100, &0);
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn test_get_price_history_returns_descending_order() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "Stellar DEX");
+
+        client.register_asset(&admin, &asset);
+
+        for i in 0..3u64 {
+            env.ledger().set_timestamp(1_000_000 + i * 3_600);
+            client.submit_price(&admin, &asset, &(1_000_000 + i as i128 * 1_000), &source);
+        }
+
+        let history = client.get_price_history(&asset, &0, &2_000_000, &100, &0);
+        assert_eq!(history.len(), 3);
+        // Newest first
+        assert!(history.get(0).unwrap().timestamp > history.get(1).unwrap().timestamp);
+        assert!(history.get(1).unwrap().timestamp > history.get(2).unwrap().timestamp);
+    }
+
+    #[test]
+    fn test_get_price_history_limit_caps_at_100() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "Stellar DEX");
+
+        client.register_asset(&admin, &asset);
+
+        // Requesting a limit higher than 100 should still return at most what's available
+        env.ledger().set_timestamp(1_000_000);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
+
+        let history = client.get_price_history(&asset, &0, &2_000_000, &200, &0);
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn test_get_price_history_pagination_with_offset() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "Stellar DEX");
+
+        client.register_asset(&admin, &asset);
+
+        for i in 0..5u64 {
+            env.ledger().set_timestamp(1_000_000 + i * 3_600);
+            client.submit_price(&admin, &asset, &(1_000_000 + i as i128 * 1_000), &source);
+        }
+
+        // Get first 2 records
+        let page1 = client.get_price_history(&asset, &0, &2_000_000, &2, &0);
+        assert_eq!(page1.len(), 2);
+
+        // Get next 2 records
+        let page2 = client.get_price_history(&asset, &0, &2_000_000, &2, &2);
+        assert_eq!(page2.len(), 2);
+
+        // Get remaining
+        let page3 = client.get_price_history(&asset, &0, &2_000_000, &2, &4);
+        assert_eq!(page3.len(), 1);
+
+        // Pages should not overlap
+        assert!(page1.get(0).unwrap().timestamp > page2.get(0).unwrap().timestamp);
+        assert!(page2.get(0).unwrap().timestamp > page3.get(0).unwrap().timestamp);
+    }
+
+    #[test]
+    fn test_get_price_history_no_data_returns_empty() {
+        let (env, client, _admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+
+        let history = client.get_price_history(&asset, &0, &2_000_000, &100, &0);
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_price_history_invalid_time_range_panics() {
+        let (env, client, _admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+
+        // start_time > end_time should panic
+        client.get_price_history(&asset, &2_000_000, &1_000_000, &100, &0);
+    }
+
+    #[test]
+    fn test_get_price_history_exact_limit() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "Stellar DEX");
+
+        client.register_asset(&admin, &asset);
+
+        for i in 0..5u64 {
+            env.ledger().set_timestamp(1_000_000 + i * 3_600);
+            client.submit_price(&admin, &asset, &(1_000_000 + i as i128 * 1_000), &source);
+        }
+
+        // Limit of 3 should return exactly 3
+        let history = client.get_price_history(&asset, &0, &2_000_000, &3, &0);
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn test_submit_price_stores_history() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "Stellar DEX");
+
+        client.register_asset(&admin, &asset);
+
+        env.ledger().set_timestamp(1_000_000);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
+
+        env.ledger().set_timestamp(1_003_600);
+        client.submit_price(&admin, &asset, &1_010_000, &source);
+
+        // Latest price should be the second submission
+        let latest = client.get_price(&asset).unwrap();
+        assert_eq!(latest.price, 1_010_000);
+
+        // History should contain both submissions
+        let history = client.get_price_history(&asset, &0, &2_000_000, &100, &0);
+        assert_eq!(history.len(), 2);
     }
 
     // -----------------------------------------------------------------------
