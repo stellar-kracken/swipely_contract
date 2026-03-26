@@ -13,6 +13,8 @@ pub mod insurance_pool;
 pub mod rate_limiter;
 #[cfg(test)]
 pub mod asset_registry;
+#[cfg(test)]
+pub mod circuit_breaker;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
 
