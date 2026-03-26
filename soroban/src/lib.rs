@@ -13,6 +13,7 @@ pub mod insurance_pool;
 pub mod rate_limiter;
 #[cfg(test)]
 pub mod asset_registry;
+pub mod analytics_aggregator;
 #[cfg(test)]
 pub mod circuit_breaker;
 
