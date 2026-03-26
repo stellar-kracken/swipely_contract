@@ -5,6 +5,7 @@
 #[cfg(test)]
 pub mod governance;
 pub mod liquidity_pool;
+pub mod reputation_system;
 #[cfg(test)]
 pub mod insurance_pool;
 #[cfg(test)]
