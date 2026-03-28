@@ -593,6 +593,108 @@ pub enum DataKey {
     CurrentContractWasmHash,
     /// Most recent rollback target hash (previous active Wasm hash).
     RollbackTargetHash,
+    // -----------------------------------------------------------------------
+    // Configuration Management storage keys (issue #103)
+    // -----------------------------------------------------------------------
+    /// A single configuration entry keyed by category + name.
+    ConfigEntry(ConfigCategory, String),
+    /// Ordered list of all (category, name) pairs for enumeration.
+    ConfigKeys,
+    /// Audit trail for a specific parameter (Vec<ConfigAuditEntry>).
+    ConfigAuditLog(ConfigCategory, String),
+}
+
+// ---------------------------------------------------------------------------
+// Configuration Management types (issue #103)
+// ---------------------------------------------------------------------------
+
+/// Categories that group related configuration parameters.
+///
+/// - `Thresholds` – numeric trigger values (e.g. deviation bps, health score).
+/// - `Timeouts`   – durations expressed in seconds (e.g. cooldown periods).
+/// - `Limits`     – capacity / rate limits (e.g. max assets, max batch size).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigCategory {
+    Thresholds,
+    Timeouts,
+    Limits,
+}
+
+/// The typed value stored for a configuration parameter.
+///
+/// All values are stored as `i128` to keep the on-chain format uniform and
+/// gas-efficient. Boolean flags are encoded as 0 (false) or 1 (true). The
+/// `description` field is stored only at write time so callers always know
+/// what the parameter controls.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigValue {
+    /// Numeric parameter value.
+    pub value: i128,
+    /// Human-readable description of what this parameter controls.
+    pub description: String,
+}
+
+/// A versioned, timestamped on-chain configuration entry.
+///
+/// Every write to a parameter creates a new `ConfigEntry` with an
+/// auto-incremented `version`. The previous value is preserved in the
+/// `ConfigAuditLog` for that parameter.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigEntry {
+    /// Parameter category.
+    pub category: ConfigCategory,
+    /// Parameter name (e.g. "health_score_min_threshold").
+    pub name: String,
+    /// Current value.
+    pub value: ConfigValue,
+    /// Monotonically-increasing write counter (starts at 1).
+    pub version: u32,
+    /// Ledger timestamp of the most recent write.
+    pub updated_at: u64,
+    /// Address that performed the most recent write.
+    pub updated_by: Address,
+}
+
+/// A single audit log record written every time a parameter is changed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigAuditEntry {
+    /// The value that was replaced.
+    pub old_value: i128,
+    /// The new value that was written.
+    pub new_value: i128,
+    /// Version number that was assigned to the new write.
+    pub version: u32,
+    /// Ledger timestamp of the change.
+    pub changed_at: u64,
+    /// Address that performed the change.
+    pub changed_by: Address,
+}
+
+/// A single item inside a bulk configuration update request.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BulkConfigUpdate {
+    pub category: ConfigCategory,
+    pub name: String,
+    pub value: i128,
+    pub description: String,
+}
+
+/// Snapshot of all stored configuration parameters — returned by
+/// `get_all_configs()` for export / off-chain synchronisation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AllConfigsExport {
+    /// All current configuration entries.
+    pub entries: Vec<ConfigEntry>,
+    /// Total number of parameters stored.
+    pub total: u32,
+    /// Ledger timestamp when this export was generated.
+    pub exported_at: u64,
 }
 
 #[contract]
@@ -1947,8 +2049,10 @@ impl BridgeWatchContract {
 
         for entry in entries.iter() {
             acl::revoke_role_internal(&env, &entry.grantee, &entry.role);
-            env.events()
-                .publish((symbol_short!("acl_revk"), entry.grantee.clone()), entry.role);
+            env.events().publish(
+                (symbol_short!("acl_revk"), entry.grantee.clone()),
+                entry.role,
+            );
         }
     }
 
@@ -2530,7 +2634,9 @@ impl BridgeWatchContract {
             emergency: proposal.emergency,
             is_rollback: proposal.is_rollback,
             has_migration_callback: proposal.migration_callback.is_some(),
-            migration_callback: proposal.migration_callback.unwrap_or(env.current_contract_address()),
+            migration_callback: proposal
+                .migration_callback
+                .unwrap_or(env.current_contract_address()),
         });
         env.storage()
             .persistent()
@@ -2853,6 +2959,435 @@ impl BridgeWatchContract {
                 + checkpoints.archived_records,
             entries,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Configuration Management (issue #103)
+    // -----------------------------------------------------------------------
+
+    /// Store or update a single on-chain configuration parameter.
+    ///
+    /// # Access control
+    /// Only the contract admin or an address with the `SuperAdmin` role may
+    /// call this function.
+    ///
+    /// # Parameters
+    /// - `caller`      – The address performing the update. Must be authorised.
+    /// - `category`    – Parameter category (`Thresholds`, `Timeouts`, `Limits`).
+    /// - `name`        – Parameter name, max 64 bytes.
+    /// - `value`       – New numeric value.
+    /// - `description` – Human-readable description (required, max 256 bytes).
+    ///
+    /// # Validation
+    /// - `name` must be non-empty and ≤ 64 bytes.
+    /// - `description` must be non-empty and ≤ 256 bytes.
+    /// - For `Timeouts` category: `value` must be ≥ 1 (at least 1 second).
+    /// - For `Limits` category: `value` must be ≥ 1.
+    /// - For `Thresholds` category: `value` must be ≥ 0.
+    ///
+    /// # Events
+    /// Publishes a `("config_up", category_tag, name)` event with the new value.
+    ///
+    /// # Audit trail
+    /// Appends a `ConfigAuditEntry` to the parameter's audit log (capped at 50
+    /// entries; oldest entries are dropped when the cap is reached).
+    pub fn set_config(
+        env: Env,
+        caller: Address,
+        category: ConfigCategory,
+        name: String,
+        value: i128,
+        description: String,
+    ) {
+        caller.require_auth();
+        Self::assert_not_globally_paused(&env);
+        Self::check_no_pending_transfer(&env);
+
+        // Admin-only: require admin or SuperAdmin role
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            let has_super = Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+            if !has_super {
+                panic!("unauthorized: only admin may modify configuration");
+            }
+        }
+
+        // Validate name (non-empty, ≤ 64 bytes)
+        if name.len() == 0 {
+            panic!("config: name must not be empty");
+        }
+        if name.len() > 64 {
+            panic!("config: name must be ≤ 64 bytes");
+        }
+
+        // Validate description (non-empty, ≤ 256 bytes)
+        if description.len() == 0 {
+            panic!("config: description must not be empty");
+        }
+        if description.len() > 256 {
+            panic!("config: description must be ≤ 256 bytes");
+        }
+
+        // Category-specific value validation
+        match category {
+            ConfigCategory::Thresholds => {
+                if value < 0 {
+                    panic!("config: threshold value must be ≥ 0");
+                }
+            }
+            ConfigCategory::Timeouts => {
+                if value < 1 {
+                    panic!("config: timeout value must be ≥ 1 second");
+                }
+            }
+            ConfigCategory::Limits => {
+                if value < 1 {
+                    panic!("config: limit value must be ≥ 1");
+                }
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let storage_key = DataKey::ConfigEntry(category.clone(), name.clone());
+
+        // Determine previous value and compute new version
+        let (old_value, new_version) = if let Some(existing) = env
+            .storage()
+            .instance()
+            .get::<DataKey, ConfigEntry>(&storage_key)
+        {
+            (existing.value.value, existing.version + 1)
+        } else {
+            (0_i128, 1_u32)
+        };
+
+        // Write updated entry
+        let entry = ConfigEntry {
+            category: category.clone(),
+            name: name.clone(),
+            value: ConfigValue { value, description },
+            version: new_version,
+            updated_at: now,
+            updated_by: caller.clone(),
+        };
+        env.storage().instance().set(&storage_key, &entry);
+
+        // Maintain global key list for enumeration
+        let keys_key = DataKey::ConfigKeys;
+        let mut keys: Vec<(ConfigCategory, String)> = env
+            .storage()
+            .instance()
+            .get(&keys_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut found = false;
+        for i in 0..keys.len() {
+            let (ref k_cat, ref k_name) = keys.get(i).unwrap();
+            if *k_cat == category && *k_name == name {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            keys.push_back((category.clone(), name.clone()));
+            env.storage().instance().set(&keys_key, &keys);
+        }
+
+        // Append to audit log (cap at 50 entries)
+        let audit_key = DataKey::ConfigAuditLog(category.clone(), name.clone());
+        let mut audit_log: Vec<ConfigAuditEntry> = env
+            .storage()
+            .instance()
+            .get(&audit_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let audit_entry = ConfigAuditEntry {
+            old_value,
+            new_value: value,
+            version: new_version,
+            changed_at: now,
+            changed_by: caller,
+        };
+        audit_log.push_back(audit_entry);
+
+        // Trim to last 50 entries
+        while audit_log.len() > 50 {
+            let mut trimmed: Vec<ConfigAuditEntry> = Vec::new(&env);
+            for i in 1..audit_log.len() {
+                trimmed.push_back(audit_log.get(i).unwrap());
+            }
+            audit_log = trimmed;
+        }
+        env.storage().instance().set(&audit_key, &audit_log);
+
+        // Emit change notification event
+        let category_tag = match category {
+            ConfigCategory::Thresholds => symbol_short!("thresh"),
+            ConfigCategory::Timeouts => symbol_short!("timeout"),
+            ConfigCategory::Limits => symbol_short!("limits"),
+        };
+        env.events()
+            .publish((symbol_short!("config_up"), category_tag, name), value);
+    }
+
+    /// Retrieve a single configuration parameter by category and name.
+    ///
+    /// Returns `None` when no value has been explicitly stored and no default
+    /// exists. Callers should apply their own application-layer defaults for
+    /// `None` responses.
+    ///
+    /// No authorisation required — read-only.
+    pub fn get_config(env: Env, category: ConfigCategory, name: String) -> Option<ConfigEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ConfigEntry(category, name))
+    }
+
+    /// Retrieve all stored configuration parameters as a single export.
+    ///
+    /// Returns an `AllConfigsExport` containing every `ConfigEntry` currently
+    /// stored on-chain, the total count, and the ledger timestamp of the
+    /// export.
+    ///
+    /// No authorisation required — read-only.
+    pub fn get_all_configs(env: Env) -> AllConfigsExport {
+        let now = env.ledger().timestamp();
+        let keys: Vec<(ConfigCategory, String)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConfigKeys)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut entries: Vec<ConfigEntry> = Vec::new(&env);
+        for i in 0..keys.len() {
+            let (cat, nm) = keys.get(i).unwrap();
+            if let Some(entry) = env
+                .storage()
+                .instance()
+                .get::<DataKey, ConfigEntry>(&DataKey::ConfigEntry(cat, nm))
+            {
+                entries.push_back(entry);
+            }
+        }
+
+        let total = entries.len();
+        AllConfigsExport {
+            entries,
+            total,
+            exported_at: now,
+        }
+    }
+
+    /// Retrieve the full audit log for a specific configuration parameter.
+    ///
+    /// Returns an empty `Vec` when no changes have been recorded yet.
+    ///
+    /// No authorisation required — read-only.
+    pub fn get_config_audit_log(
+        env: Env,
+        category: ConfigCategory,
+        name: String,
+    ) -> Vec<ConfigAuditEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ConfigAuditLog(category, name))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Apply multiple configuration updates atomically in a single transaction.
+    ///
+    /// Each update in `updates` follows the same validation rules as
+    /// `set_config()`. If any update fails validation the entire call panics
+    /// and no changes are written.
+    ///
+    /// # Access control
+    /// Only the contract admin or an address with the `SuperAdmin` role.
+    ///
+    /// # Limits
+    /// At most 20 updates per call to bound gas usage.
+    pub fn set_config_bulk(env: Env, caller: Address, updates: Vec<BulkConfigUpdate>) {
+        caller.require_auth();
+        Self::assert_not_globally_paused(&env);
+        Self::check_no_pending_transfer(&env);
+
+        // Admin-only guard
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            let has_super = Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+            if !has_super {
+                panic!("unauthorized: only admin may modify configuration");
+            }
+        }
+
+        if updates.len() == 0 {
+            panic!("config: bulk update list must not be empty");
+        }
+        if updates.len() > 20 {
+            panic!("config: bulk update list must contain at most 20 items");
+        }
+
+        // Apply each update — uses the same logic as set_config()
+        for i in 0..updates.len() {
+            let u = updates.get(i).unwrap();
+            Self::set_config(
+                env.clone(),
+                caller.clone(),
+                u.category,
+                u.name,
+                u.value,
+                u.description,
+            );
+        }
+    }
+
+    /// Initialise configuration with the protocol's built-in default values.
+    ///
+    /// Safe to call multiple times: existing values are **not** overwritten,
+    /// only parameters that are absent are initialised. Intended to be called
+    /// once after `initialize()` to seed the on-chain configuration with
+    /// sensible defaults.
+    ///
+    /// # Default parameters
+    ///
+    /// **Thresholds**
+    /// | Name                         | Default | Unit          |
+    /// |------------------------------|---------|---------------|
+    /// | `health_score_min`           | 50      | score (0–100) |
+    /// | `price_deviation_low_bps`    | 200     | basis points  |
+    /// | `price_deviation_medium_bps` | 500     | basis points  |
+    /// | `price_deviation_high_bps`   | 1000    | basis points  |
+    /// | `supply_mismatch_bps`        | 10      | basis points  |
+    ///
+    /// **Timeouts**
+    /// | Name                      | Default | Unit    |
+    /// |---------------------------|---------|---------|
+    /// | `price_staleness_seconds` | 3600    | seconds |
+    /// | `health_staleness_seconds`| 3600    | seconds |
+    /// | `pause_timelock_seconds`  | 300     | seconds |
+    /// | `admin_transfer_timeout`  | 86400   | seconds |
+    ///
+    /// **Limits**
+    /// | Name                   | Default | Unit  |
+    /// |------------------------|---------|-------|
+    /// | `max_monitored_assets` | 100     | count |
+    /// | `max_batch_size`       | 50      | count |
+    /// | `max_signers`          | 20      | count |
+    /// | `max_price_history`    | 100     | count |
+    pub fn init_default_config(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_not_globally_paused(&env);
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            let has_super = Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+            if !has_super {
+                panic!("unauthorized: only admin may initialise default config");
+            }
+        }
+
+        // Helper closure: only write when the key doesn't exist yet.
+        let set_if_absent = |cat: ConfigCategory, nm: &str, val: i128, desc: &str| {
+            let key = DataKey::ConfigEntry(cat.clone(), String::from_str(&env, nm));
+            if env
+                .storage()
+                .instance()
+                .get::<DataKey, ConfigEntry>(&key)
+                .is_none()
+            {
+                Self::set_config(
+                    env.clone(),
+                    caller.clone(),
+                    cat,
+                    String::from_str(&env, nm),
+                    val,
+                    String::from_str(&env, desc),
+                );
+            }
+        };
+
+        // Thresholds
+        set_if_absent(
+            ConfigCategory::Thresholds,
+            "health_score_min",
+            50,
+            "Minimum acceptable composite health score (0-100)",
+        );
+        set_if_absent(
+            ConfigCategory::Thresholds,
+            "price_deviation_low_bps",
+            200,
+            "Low-severity price deviation trigger in basis points (default 2%)",
+        );
+        set_if_absent(
+            ConfigCategory::Thresholds,
+            "price_deviation_medium_bps",
+            500,
+            "Medium-severity price deviation trigger in basis points (default 5%)",
+        );
+        set_if_absent(
+            ConfigCategory::Thresholds,
+            "price_deviation_high_bps",
+            1000,
+            "High-severity price deviation trigger in basis points (default 10%)",
+        );
+        set_if_absent(
+            ConfigCategory::Thresholds,
+            "supply_mismatch_bps",
+            10,
+            "Critical supply mismatch threshold in basis points (default 0.1%)",
+        );
+
+        // Timeouts
+        set_if_absent(
+            ConfigCategory::Timeouts,
+            "price_staleness_seconds",
+            3600,
+            "Age in seconds after which a price record is considered stale",
+        );
+        set_if_absent(
+            ConfigCategory::Timeouts,
+            "health_staleness_seconds",
+            3600,
+            "Age in seconds after which a health score is considered stale",
+        );
+        set_if_absent(
+            ConfigCategory::Timeouts,
+            "pause_timelock_seconds",
+            300,
+            "Minimum seconds that must elapse before an emergency pause can be lifted",
+        );
+        set_if_absent(
+            ConfigCategory::Timeouts,
+            "admin_transfer_timeout",
+            86400,
+            "Seconds until a pending admin transfer proposal expires automatically",
+        );
+
+        // Limits
+        set_if_absent(
+            ConfigCategory::Limits,
+            "max_monitored_assets",
+            100,
+            "Maximum number of assets that may be registered simultaneously",
+        );
+        set_if_absent(
+            ConfigCategory::Limits,
+            "max_batch_size",
+            50,
+            "Maximum number of records in a single batch submit call",
+        );
+        set_if_absent(
+            ConfigCategory::Limits,
+            "max_signers",
+            20,
+            "Maximum number of registered signers allowed at one time",
+        );
+        set_if_absent(
+            ConfigCategory::Limits,
+            "max_price_history",
+            100,
+            "Maximum number of historical price records retained per asset",
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3533,9 +4068,10 @@ impl BridgeWatchContract {
             );
 
             if asset.has_latest_price {
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::PriceRecord(asset.asset_code.clone()), &asset.latest_price);
+                env.storage().persistent().set(
+                    &DataKey::PriceRecord(asset.asset_code.clone()),
+                    &asset.latest_price,
+                );
             } else {
                 env.storage()
                     .persistent()
@@ -5218,7 +5754,10 @@ mod tests {
         let mut buf = [0u8; 256];
         asset_code.copy_into_slice(&mut buf[..len.min(256)]);
         let mut ci = 0;
-        while ci < len.min(256) { data.push_back(buf[ci]); ci += 1; }
+        while ci < len.min(256) {
+            data.push_back(buf[ci]);
+            ci += 1;
+        }
 
         let hs = health_score.to_be_bytes();
         let mut j = 0;
@@ -5266,7 +5805,10 @@ mod tests {
         let mut sid_buf = [0u8; 256];
         signer_id.copy_into_slice(&mut sid_buf[..sid_len.min(256)]);
         let mut si = 0;
-        while si < sid_len.min(256) { data.push_back(sid_buf[si]); si += 1; }
+        while si < sid_len.min(256) {
+            data.push_back(sid_buf[si]);
+            si += 1;
+        }
 
         let public_key_bytes = public_key.to_array();
         let mut j = 0;
@@ -7467,8 +8009,16 @@ mod tests {
 
         let entries = soroban_sdk::vec![
             &env,
-            acl::BulkRoleEntry { grantee: u1.clone(), role: acl::Role::Operator, expires_at: 0 },
-            acl::BulkRoleEntry { grantee: u2.clone(), role: acl::Role::ReadOnly, expires_at: 0 },
+            acl::BulkRoleEntry {
+                grantee: u1.clone(),
+                role: acl::Role::Operator,
+                expires_at: 0
+            },
+            acl::BulkRoleEntry {
+                grantee: u2.clone(),
+                role: acl::Role::ReadOnly,
+                expires_at: 0
+            },
         ];
         client.acl_bulk_grant_roles(&admin, &entries);
 
@@ -7484,15 +8034,31 @@ mod tests {
 
         let grant_entries = soroban_sdk::vec![
             &env,
-            acl::BulkRoleEntry { grantee: u1.clone(), role: acl::Role::Operator, expires_at: 0 },
-            acl::BulkRoleEntry { grantee: u2.clone(), role: acl::Role::ReadOnly, expires_at: 0 },
+            acl::BulkRoleEntry {
+                grantee: u1.clone(),
+                role: acl::Role::Operator,
+                expires_at: 0
+            },
+            acl::BulkRoleEntry {
+                grantee: u2.clone(),
+                role: acl::Role::ReadOnly,
+                expires_at: 0
+            },
         ];
         client.acl_bulk_grant_roles(&admin, &grant_entries);
 
         let revoke_entries = soroban_sdk::vec![
             &env,
-            acl::BulkRoleEntry { grantee: u1.clone(), role: acl::Role::Operator, expires_at: 0 },
-            acl::BulkRoleEntry { grantee: u2.clone(), role: acl::Role::ReadOnly, expires_at: 0 },
+            acl::BulkRoleEntry {
+                grantee: u1.clone(),
+                role: acl::Role::Operator,
+                expires_at: 0
+            },
+            acl::BulkRoleEntry {
+                grantee: u2.clone(),
+                role: acl::Role::ReadOnly,
+                expires_at: 0
+            },
         ];
         client.acl_bulk_revoke_roles(&admin, &revoke_entries);
 
@@ -7623,5 +8189,320 @@ mod tests {
             });
         }
         client.acl_bulk_grant_roles(&admin, &entries);
+    }
+
+    // -----------------------------------------------------------------------
+    // Configuration Management tests (issue #103)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_and_get_config() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "health_score_min");
+        let desc = String::from_str(&env, "Minimum health score threshold");
+
+        client.set_config(&admin, &ConfigCategory::Thresholds, &name, &75, &desc);
+
+        let entry = client
+            .get_config(&ConfigCategory::Thresholds, &name)
+            .unwrap();
+        assert_eq!(entry.value.value, 75);
+        assert_eq!(entry.version, 1);
+        assert_eq!(entry.category, ConfigCategory::Thresholds);
+        assert_eq!(entry.name, name);
+    }
+
+    #[test]
+    fn test_config_versioning_increments_on_each_write() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "price_deviation_low_bps");
+        let desc = String::from_str(&env, "Low deviation threshold in bps");
+
+        client.set_config(&admin, &ConfigCategory::Thresholds, &name, &200, &desc);
+        let v1 = client
+            .get_config(&ConfigCategory::Thresholds, &name)
+            .unwrap();
+        assert_eq!(v1.version, 1);
+        assert_eq!(v1.value.value, 200);
+
+        client.set_config(&admin, &ConfigCategory::Thresholds, &name, &300, &desc);
+        let v2 = client
+            .get_config(&ConfigCategory::Thresholds, &name)
+            .unwrap();
+        assert_eq!(v2.version, 2);
+        assert_eq!(v2.value.value, 300);
+
+        client.set_config(&admin, &ConfigCategory::Thresholds, &name, &400, &desc);
+        let v3 = client
+            .get_config(&ConfigCategory::Thresholds, &name)
+            .unwrap();
+        assert_eq!(v3.version, 3);
+    }
+
+    #[test]
+    fn test_config_audit_log_is_appended() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "pause_timelock_seconds");
+        let desc = String::from_str(&env, "Timelock for unpause");
+
+        // Timeouts category
+        client.set_config(&admin, &ConfigCategory::Timeouts, &name, &300, &desc);
+        client.set_config(&admin, &ConfigCategory::Timeouts, &name, &600, &desc);
+
+        let log = client.get_config_audit_log(&ConfigCategory::Timeouts, &name);
+        assert_eq!(log.len(), 2);
+
+        let first = log.get(0).unwrap();
+        assert_eq!(first.old_value, 0); // no prior value
+        assert_eq!(first.new_value, 300);
+        assert_eq!(first.version, 1);
+
+        let second = log.get(1).unwrap();
+        assert_eq!(second.old_value, 300);
+        assert_eq!(second.new_value, 600);
+        assert_eq!(second.version, 2);
+    }
+
+    #[test]
+    fn test_get_all_configs_returns_all_stored_entries() {
+        let (env, client, admin) = setup();
+
+        let n1 = String::from_str(&env, "max_monitored_assets");
+        let d1 = String::from_str(&env, "Max assets");
+        let n2 = String::from_str(&env, "max_batch_size");
+        let d2 = String::from_str(&env, "Max batch");
+
+        client.set_config(&admin, &ConfigCategory::Limits, &n1, &100, &d1);
+        client.set_config(&admin, &ConfigCategory::Limits, &n2, &50, &d2);
+
+        let export = client.get_all_configs();
+        assert_eq!(export.total, 2);
+        assert_eq!(export.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_bulk_config_update() {
+        let (env, client, admin) = setup();
+
+        let mut updates: Vec<BulkConfigUpdate> = Vec::new(&env);
+        updates.push_back(BulkConfigUpdate {
+            category: ConfigCategory::Thresholds,
+            name: String::from_str(&env, "health_score_min"),
+            value: 60,
+            description: String::from_str(&env, "Min health score"),
+        });
+        updates.push_back(BulkConfigUpdate {
+            category: ConfigCategory::Timeouts,
+            name: String::from_str(&env, "price_staleness_seconds"),
+            value: 1800,
+            description: String::from_str(&env, "Staleness window"),
+        });
+
+        client.set_config_bulk(&admin, &updates);
+
+        let e1 = client
+            .get_config(
+                &ConfigCategory::Thresholds,
+                &String::from_str(&env, "health_score_min"),
+            )
+            .unwrap();
+        assert_eq!(e1.value.value, 60);
+
+        let e2 = client
+            .get_config(
+                &ConfigCategory::Timeouts,
+                &String::from_str(&env, "price_staleness_seconds"),
+            )
+            .unwrap();
+        assert_eq!(e2.value.value, 1800);
+    }
+
+    #[test]
+    fn test_init_default_config_seeds_all_defaults() {
+        let (env, client, admin) = setup();
+
+        client.init_default_config(&admin);
+
+        let export = client.get_all_configs();
+        // 5 thresholds + 4 timeouts + 4 limits = 13 defaults
+        assert_eq!(export.total, 13);
+
+        // Spot-check a few values
+        let health_min = client
+            .get_config(
+                &ConfigCategory::Thresholds,
+                &String::from_str(&env, "health_score_min"),
+            )
+            .unwrap();
+        assert_eq!(health_min.value.value, 50);
+
+        let max_assets = client
+            .get_config(
+                &ConfigCategory::Limits,
+                &String::from_str(&env, "max_monitored_assets"),
+            )
+            .unwrap();
+        assert_eq!(max_assets.value.value, 100);
+
+        let staleness = client
+            .get_config(
+                &ConfigCategory::Timeouts,
+                &String::from_str(&env, "price_staleness_seconds"),
+            )
+            .unwrap();
+        assert_eq!(staleness.value.value, 3600);
+    }
+
+    #[test]
+    fn test_init_default_config_does_not_overwrite_existing() {
+        let (env, client, admin) = setup();
+
+        // Set a custom value before seeding defaults
+        let name = String::from_str(&env, "health_score_min");
+        let desc = String::from_str(&env, "Custom override");
+        client.set_config(&admin, &ConfigCategory::Thresholds, &name, &99, &desc);
+
+        client.init_default_config(&admin);
+
+        let entry = client
+            .get_config(&ConfigCategory::Thresholds, &name)
+            .unwrap();
+        // Should still be the custom value, not the default 50
+        assert_eq!(entry.value.value, 99);
+        assert_eq!(entry.version, 1); // no extra write happened
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized: only admin may modify configuration")]
+    fn test_set_config_non_admin_panics() {
+        let (env, client, _admin) = setup();
+
+        let non_admin = Address::generate(&env);
+        let name = String::from_str(&env, "health_score_min");
+        let desc = String::from_str(&env, "desc");
+
+        client.set_config(&non_admin, &ConfigCategory::Thresholds, &name, &50, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: name must not be empty")]
+    fn test_set_config_empty_name_panics() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "");
+        let desc = String::from_str(&env, "valid description");
+
+        client.set_config(&admin, &ConfigCategory::Thresholds, &name, &50, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: description must not be empty")]
+    fn test_set_config_empty_description_panics() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "valid_name");
+        let desc = String::from_str(&env, "");
+
+        client.set_config(&admin, &ConfigCategory::Thresholds, &name, &50, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: threshold value must be")]
+    fn test_set_config_negative_threshold_panics() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "health_score_min");
+        let desc = String::from_str(&env, "desc");
+
+        client.set_config(&admin, &ConfigCategory::Thresholds, &name, &-1, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: timeout value must be")]
+    fn test_set_config_zero_timeout_panics() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "pause_timelock_seconds");
+        let desc = String::from_str(&env, "desc");
+
+        client.set_config(&admin, &ConfigCategory::Timeouts, &name, &0, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: limit value must be")]
+    fn test_set_config_zero_limit_panics() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "max_monitored_assets");
+        let desc = String::from_str(&env, "desc");
+
+        client.set_config(&admin, &ConfigCategory::Limits, &name, &0, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: bulk update list must not be empty")]
+    fn test_bulk_config_empty_list_panics() {
+        let (env, client, admin) = setup();
+
+        let updates: Vec<BulkConfigUpdate> = Vec::new(&env);
+        client.set_config_bulk(&admin, &updates);
+    }
+
+    #[test]
+    fn test_get_config_returns_none_for_unknown_key() {
+        let (env, client, _admin) = setup();
+
+        let result = client.get_config(
+            &ConfigCategory::Thresholds,
+            &String::from_str(&env, "nonexistent_key"),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_config_event_emitted_on_set() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "health_score_min");
+        let desc = String::from_str(&env, "desc");
+
+        client.set_config(&admin, &ConfigCategory::Thresholds, &name, &75, &desc);
+
+        // Verify at least one event was published
+        let events = env.events().all();
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn test_config_all_three_categories() {
+        let (env, client, admin) = setup();
+
+        client.set_config(
+            &admin,
+            &ConfigCategory::Thresholds,
+            &String::from_str(&env, "t_param"),
+            &100,
+            &String::from_str(&env, "threshold param"),
+        );
+        client.set_config(
+            &admin,
+            &ConfigCategory::Timeouts,
+            &String::from_str(&env, "to_param"),
+            &60,
+            &String::from_str(&env, "timeout param"),
+        );
+        client.set_config(
+            &admin,
+            &ConfigCategory::Limits,
+            &String::from_str(&env, "l_param"),
+            &10,
+            &String::from_str(&env, "limit param"),
+        );
+
+        let export = client.get_all_configs();
+        assert_eq!(export.total, 3);
     }
 }
