@@ -252,6 +252,54 @@ pub struct PendingAdminTransfer {
 }
 
 // ---------------------------------------------------------------------------
+// Contract Upgrade types (issue #98)
+// ---------------------------------------------------------------------------
+
+/// Pending contract upgrade proposal guarded by governance approvals.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposal {
+    /// Monotonic proposal identifier.
+    pub proposal_id: u64,
+    /// Governance member that created the proposal.
+    pub proposer: Address,
+    /// Target Wasm hash to activate.
+    pub new_wasm_hash: BytesN<32>,
+    /// Proposal creation timestamp.
+    pub proposed_at: u64,
+    /// Earliest timestamp at which execution is allowed.
+    pub execute_after: u64,
+    /// Number of distinct governance approvals required to execute.
+    pub required_approvals: u32,
+    /// Distinct governance addresses that have approved this proposal.
+    pub approvals: Vec<Address>,
+    /// `true` for emergency upgrade path.
+    pub emergency: bool,
+    /// Optional external migration callback contract.
+    pub migration_callback: Option<Address>,
+    /// Optional migration payload consumed by callback tooling.
+    pub migration_payload: Option<Bytes>,
+    /// `true` when this proposal is a rollback to a tracked prior hash.
+    pub is_rollback: bool,
+}
+
+/// Immutable historical entry for each executed upgrade.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeExecutionRecord {
+    pub proposal_id: u64,
+    pub executed_by: Address,
+    pub from_version: u32,
+    pub to_version: u32,
+    pub from_wasm_hash: Option<BytesN<32>>,
+    pub to_wasm_hash: BytesN<32>,
+    pub executed_at: u64,
+    pub emergency: bool,
+    pub is_rollback: bool,
+    pub migration_callback: Option<Address>,
+}
+
+// ---------------------------------------------------------------------------
 // Snapshot and checkpoint types (issue #105)
 // ---------------------------------------------------------------------------
 
@@ -521,6 +569,21 @@ pub enum DataKey {
     // -----------------------------------------------------------------------
     /// Pending two-step admin transfer proposal (`PendingAdminTransfer`).
     PendingTransfer,
+    // -----------------------------------------------------------------------
+    // Contract Upgrade storage keys (issue #98)
+    // -----------------------------------------------------------------------
+    /// Pending contract upgrade proposal (`UpgradeProposal`).
+    PendingUpgrade,
+    /// Monotonic proposal id counter for upgrades.
+    UpgradeProposalCounter,
+    /// Ordered execution history of upgrades (`Vec<UpgradeExecutionRecord>`).
+    UpgradeHistory,
+    /// Monotonic semantic version counter for the contract state.
+    ContractVersion,
+    /// Latest active contract Wasm hash.
+    CurrentContractWasmHash,
+    /// Most recent rollback target hash (previous active Wasm hash).
+    RollbackTargetHash,
 }
 
 #[contract]
@@ -554,6 +617,16 @@ impl BridgeWatchContract {
         env.storage()
             .instance()
             .set(&DataKey::LastCheckpointAt, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeProposalCounter, &0u64);
+        let empty_upgrade_history: Vec<UpgradeExecutionRecord> = Vec::new(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::UpgradeHistory, &empty_upgrade_history);
 
         Self::initialize_retention_policies(&env);
     }
@@ -2042,6 +2115,236 @@ impl BridgeWatchContract {
     }
 
     // -----------------------------------------------------------------------
+    // Contract Upgrade (issue #98)
+    // -----------------------------------------------------------------------
+
+    /// Propose a contract upgrade with governance approval and timelock.
+    ///
+    /// Standard proposals enforce a 48-hour timelock. Emergency proposals use
+    /// a higher governance threshold and may execute immediately.
+    pub fn propose_upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+        emergency: bool,
+        migration_callback: Option<Address>,
+        migration_payload: Option<Bytes>,
+    ) -> u64 {
+        Self::check_permission(&env, &caller, AdminRole::SuperAdmin);
+        Self::check_no_pending_transfer(&env);
+        if env.storage().instance().has(&DataKey::PendingUpgrade) {
+            panic!("an upgrade proposal is already pending");
+        }
+
+        Self::create_upgrade_proposal(
+            &env,
+            &caller,
+            new_wasm_hash,
+            emergency,
+            migration_callback,
+            migration_payload,
+            false,
+        )
+    }
+
+    /// Propose a rollback using the tracked prior Wasm hash.
+    pub fn propose_rollback(
+        env: Env,
+        caller: Address,
+        emergency: bool,
+        migration_callback: Option<Address>,
+        migration_payload: Option<Bytes>,
+    ) -> u64 {
+        Self::check_permission(&env, &caller, AdminRole::SuperAdmin);
+        Self::check_no_pending_transfer(&env);
+        if env.storage().instance().has(&DataKey::PendingUpgrade) {
+            panic!("an upgrade proposal is already pending");
+        }
+
+        let rollback_hash: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RollbackTargetHash)
+            .unwrap_or_else(|| panic!("no rollback target is currently tracked"));
+
+        Self::create_upgrade_proposal(
+            &env,
+            &caller,
+            rollback_hash,
+            emergency,
+            migration_callback,
+            migration_payload,
+            true,
+        )
+    }
+
+    /// Approve a pending upgrade proposal as a governance member.
+    pub fn approve_upgrade(env: Env, caller: Address, proposal_id: u64) -> u32 {
+        Self::check_permission(&env, &caller, AdminRole::SuperAdmin);
+        Self::check_no_pending_transfer(&env);
+
+        let mut proposal = Self::load_pending_upgrade(&env);
+        if proposal.proposal_id != proposal_id {
+            panic!("upgrade proposal id does not match the pending proposal");
+        }
+        if Self::vec_contains_address(&proposal.approvals, &caller) {
+            panic!("caller has already approved this upgrade proposal");
+        }
+
+        proposal.approvals.push_back(caller.clone());
+        let approval_count = proposal.approvals.len();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &proposal);
+
+        env.events().publish(
+            (symbol_short!("up_appr"), caller),
+            (proposal_id, approval_count, proposal.required_approvals),
+        );
+
+        approval_count
+    }
+
+    /// Execute a pending upgrade once timelock and governance conditions pass.
+    pub fn execute_upgrade(env: Env, caller: Address, proposal_id: u64) {
+        Self::check_permission(&env, &caller, AdminRole::SuperAdmin);
+        Self::check_no_pending_transfer(&env);
+
+        let proposal = Self::load_pending_upgrade(&env);
+        if proposal.proposal_id != proposal_id {
+            panic!("upgrade proposal id does not match the pending proposal");
+        }
+
+        let now = env.ledger().timestamp();
+        if now < proposal.execute_after {
+            panic!("upgrade timelock has not elapsed");
+        }
+        if proposal.approvals.len() < proposal.required_approvals {
+            panic!("insufficient governance approvals");
+        }
+
+        let from_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(1);
+        let to_version = from_version.saturating_add(1);
+        let from_wasm_hash: Option<BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CurrentContractWasmHash);
+
+        if let Some(previous_hash) = from_wasm_hash.clone() {
+            env.storage()
+                .instance()
+                .set(&DataKey::RollbackTargetHash, &previous_hash);
+            env.events()
+                .publish((symbol_short!("up_roll"), proposal_id), previous_hash);
+        }
+
+        if let Some(callback) = proposal.migration_callback.clone() {
+            env.events()
+                .publish((symbol_short!("up_migcb"), callback), proposal_id);
+        }
+        if let Some(payload) = proposal.migration_payload.clone() {
+            env.events()
+                .publish((symbol_short!("up_migpl"), proposal_id), payload);
+        }
+
+        #[cfg(not(test))]
+        env.deployer()
+            .update_current_contract_wasm(proposal.new_wasm_hash.clone());
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CurrentContractWasmHash, &proposal.new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &to_version);
+
+        let mut history: Vec<UpgradeExecutionRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UpgradeHistory)
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(UpgradeExecutionRecord {
+            proposal_id,
+            executed_by: caller.clone(),
+            from_version,
+            to_version,
+            from_wasm_hash,
+            to_wasm_hash: proposal.new_wasm_hash,
+            executed_at: now,
+            emergency: proposal.emergency,
+            is_rollback: proposal.is_rollback,
+            migration_callback: proposal.migration_callback,
+        });
+        env.storage()
+            .persistent()
+            .set(&DataKey::UpgradeHistory, &history);
+
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+
+        env.events().publish(
+            (symbol_short!("up_exec"), caller),
+            (
+                proposal_id,
+                from_version,
+                to_version,
+                proposal.emergency,
+                proposal.is_rollback,
+            ),
+        );
+    }
+
+    /// Cancel a pending upgrade proposal.
+    pub fn cancel_upgrade(env: Env, caller: Address, proposal_id: u64, reason: String) {
+        Self::check_permission(&env, &caller, AdminRole::SuperAdmin);
+
+        let proposal = Self::load_pending_upgrade(&env);
+        if proposal.proposal_id != proposal_id {
+            panic!("upgrade proposal id does not match the pending proposal");
+        }
+
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.events()
+            .publish((symbol_short!("up_cncl"), caller), (proposal_id, reason));
+    }
+
+    /// Return the currently pending contract upgrade proposal, if any.
+    pub fn get_pending_upgrade(env: Env) -> Option<UpgradeProposal> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
+    /// Return historical execution records for all completed upgrades.
+    pub fn get_upgrade_history(env: Env) -> Vec<UpgradeExecutionRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UpgradeHistory)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return the current semantic version counter.
+    pub fn get_contract_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(1)
+    }
+
+    /// Return the currently tracked active Wasm hash, if set.
+    pub fn get_current_wasm_hash(env: Env) -> Option<BytesN<32>> {
+        env.storage()
+            .instance()
+            .get(&DataKey::CurrentContractWasmHash)
+    }
+
+    /// Return the currently tracked rollback target hash, if available.
+    pub fn get_rollback_target(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&DataKey::RollbackTargetHash)
+    }
+
+    // -----------------------------------------------------------------------
     // Data retention and cleanup (issue #100)
     // -----------------------------------------------------------------------
 
@@ -2347,6 +2650,116 @@ impl BridgeWatchContract {
                 panic!("admin functions are locked during a pending admin transfer");
             }
         }
+    }
+
+    fn load_pending_upgrade(env: &Env) -> UpgradeProposal {
+        env.storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .unwrap_or_else(|| panic!("no pending upgrade proposal"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_upgrade_proposal(
+        env: &Env,
+        caller: &Address,
+        new_wasm_hash: BytesN<32>,
+        emergency: bool,
+        migration_callback: Option<Address>,
+        migration_payload: Option<Bytes>,
+        is_rollback: bool,
+    ) -> u64 {
+        if migration_payload.is_some() && migration_callback.is_none() {
+            panic!("migration payload requires a migration callback");
+        }
+
+        let now = env.ledger().timestamp();
+        let timelock_secs = if emergency { 0u64 } else { 172_800u64 };
+        let required_approvals = Self::upgrade_approval_threshold(env, emergency);
+        let proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::UpgradeProposalCounter)
+            .unwrap_or(0)
+            + 1;
+
+        let mut approvals = Vec::new(env);
+        approvals.push_back(caller.clone());
+
+        let proposal = UpgradeProposal {
+            proposal_id,
+            proposer: caller.clone(),
+            new_wasm_hash,
+            proposed_at: now,
+            execute_after: now + timelock_secs,
+            required_approvals,
+            approvals,
+            emergency,
+            migration_callback,
+            migration_payload,
+            is_rollback,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeProposalCounter, &proposal_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &proposal);
+
+        env.events().publish(
+            (symbol_short!("up_prop"), caller.clone()),
+            (proposal_id, required_approvals, emergency, is_rollback),
+        );
+
+        proposal_id
+    }
+
+    fn governance_member_count(env: &Env) -> u32 {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let mut members: Vec<Address> = Vec::new(env);
+        members.push_back(admin);
+
+        let assignments: Vec<RoleAssignment> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RolesList)
+            .unwrap_or_else(|| Vec::new(env));
+        for assignment in assignments.iter() {
+            if assignment.role == AdminRole::SuperAdmin
+                && !Self::vec_contains_address(&members, &assignment.address)
+            {
+                members.push_back(assignment.address);
+            }
+        }
+
+        members.len()
+    }
+
+    fn upgrade_approval_threshold(env: &Env, emergency: bool) -> u32 {
+        let members = Self::governance_member_count(env);
+        if members == 0 {
+            panic!("no governance members configured");
+        }
+
+        let standard_threshold = (members + 1) / 2;
+        if !emergency {
+            return standard_threshold;
+        }
+
+        if members < 2 {
+            panic!("emergency upgrades require at least two governance members");
+        }
+
+        let mut emergency_threshold = (members * 2 + 2) / 3;
+        if emergency_threshold <= standard_threshold {
+            emergency_threshold = standard_threshold + 1;
+        }
+        if emergency_threshold > members {
+            emergency_threshold = members;
+        }
+
+        emergency_threshold
     }
 
     /// Internal role lookup (no auth check).
@@ -3693,6 +4106,18 @@ impl BridgeWatchContract {
         false
     }
 
+    fn vec_contains_address(values: &Vec<Address>, target: &Address) -> bool {
+        let mut i = 0;
+        while i < values.len() {
+            if values.get(i).unwrap() == *target {
+                return true;
+            }
+            i += 1;
+        }
+
+        false
+    }
+
     fn append_i128(buf: &mut Bytes, value: i128) {
         let bytes = value.to_be_bytes();
         let mut i = 0;
@@ -4831,6 +5256,126 @@ mod tests {
         client.set_mismatch_threshold(&5);
 
         assert_has_event(&env, &client.address, symbol_short!("thresh_up"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Contract upgrade tests (issue #98)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_propose_upgrade_sets_pending_with_timelock() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(1_000);
+
+        let new_hash = BytesN::from_array(&env, &[7u8; 32]);
+        let proposal_id = client.propose_upgrade(&admin, &new_hash, &false, &None, &None);
+
+        assert_eq!(proposal_id, 1);
+        let pending = client.get_pending_upgrade().unwrap();
+        assert_eq!(pending.proposal_id, 1);
+        assert_eq!(pending.new_wasm_hash, new_hash);
+        assert_eq!(pending.execute_after, 1_000 + 172_800);
+        assert_eq!(pending.required_approvals, 1);
+        assert_eq!(pending.approvals.len(), 1);
+        assert_eq!(pending.approvals.get(0).unwrap(), admin);
+
+        assert_has_event(&env, &client.address, symbol_short!("up_prop"));
+    }
+
+    #[test]
+    #[should_panic(expected = "upgrade timelock has not elapsed")]
+    fn test_execute_upgrade_enforces_timelock() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(2_000);
+
+        let new_hash = BytesN::from_array(&env, &[8u8; 32]);
+        client.propose_upgrade(&admin, &new_hash, &false, &None, &None);
+        client.execute_upgrade(&admin, &1);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient governance approvals")]
+    fn test_emergency_upgrade_requires_higher_approval_threshold() {
+        let (env, client, admin) = setup();
+        let super_admin = Address::generate(&env);
+        client.grant_role(&admin, &super_admin, &AdminRole::SuperAdmin);
+
+        env.ledger().set_timestamp(3_000);
+        let new_hash = BytesN::from_array(&env, &[9u8; 32]);
+        client.propose_upgrade(&admin, &new_hash, &true, &None, &None);
+
+        let pending = client.get_pending_upgrade().unwrap();
+        assert_eq!(pending.required_approvals, 2);
+        assert_eq!(pending.execute_after, 3_000);
+
+        // Only proposer approval exists at this point.
+        client.execute_upgrade(&admin, &1);
+    }
+
+    #[test]
+    fn test_emergency_upgrade_executes_after_additional_approval() {
+        let (env, client, admin) = setup();
+        let super_admin = Address::generate(&env);
+        client.grant_role(&admin, &super_admin, &AdminRole::SuperAdmin);
+
+        env.ledger().set_timestamp(4_000);
+        let new_hash = BytesN::from_array(&env, &[10u8; 32]);
+        client.propose_upgrade(&admin, &new_hash, &true, &None, &None);
+        client.approve_upgrade(&super_admin, &1);
+        client.execute_upgrade(&admin, &1);
+
+        assert!(client.get_pending_upgrade().is_none());
+        assert_eq!(client.get_contract_version(), 2);
+        assert_eq!(client.get_current_wasm_hash().unwrap(), new_hash);
+
+        let history = client.get_upgrade_history();
+        assert_eq!(history.len(), 1);
+        let record = history.get(0).unwrap();
+        assert_eq!(record.proposal_id, 1);
+        assert!(record.emergency);
+        assert!(!record.is_rollback);
+
+        assert_has_event(&env, &client.address, symbol_short!("up_appr"));
+        assert_has_event(&env, &client.address, symbol_short!("up_exec"));
+    }
+
+    #[test]
+    fn test_cancel_upgrade_clears_pending_proposal() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(5_000);
+
+        let new_hash = BytesN::from_array(&env, &[11u8; 32]);
+        client.propose_upgrade(&admin, &new_hash, &false, &None, &None);
+        client.cancel_upgrade(&admin, &1, &String::from_str(&env, "no longer needed"));
+
+        assert!(client.get_pending_upgrade().is_none());
+        assert_has_event(&env, &client.address, symbol_short!("up_cncl"));
+    }
+
+    #[test]
+    fn test_propose_rollback_uses_tracked_target_hash() {
+        let (env, client, admin) = setup();
+
+        let first_hash = BytesN::from_array(&env, &[12u8; 32]);
+        let second_hash = BytesN::from_array(&env, &[13u8; 32]);
+
+        env.ledger().set_timestamp(10_000);
+        client.propose_upgrade(&admin, &first_hash, &false, &None, &None);
+        env.ledger().set_timestamp(10_000 + 172_800);
+        client.execute_upgrade(&admin, &1);
+
+        env.ledger().set_timestamp(200_000);
+        client.propose_upgrade(&admin, &second_hash, &false, &None, &None);
+        env.ledger().set_timestamp(200_000 + 172_800);
+        client.execute_upgrade(&admin, &2);
+
+        assert_eq!(client.get_rollback_target().unwrap(), first_hash);
+
+        let rollback_id = client.propose_rollback(&admin, &false, &None, &None);
+        assert_eq!(rollback_id, 3);
+        let pending = client.get_pending_upgrade().unwrap();
+        assert!(pending.is_rollback);
+        assert_eq!(pending.new_wasm_hash, first_hash);
     }
 
     // -----------------------------------------------------------------------
