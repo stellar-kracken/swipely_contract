@@ -296,12 +296,14 @@ pub struct UpgradeExecutionRecord {
     pub executed_by: Address,
     pub from_version: u32,
     pub to_version: u32,
-    pub from_wasm_hash: Option<BytesN<32>>,
+    pub has_from_wasm_hash: bool,
+    pub from_wasm_hash: BytesN<32>,
     pub to_wasm_hash: BytesN<32>,
     pub executed_at: u64,
     pub emergency: bool,
     pub is_rollback: bool,
-    pub migration_callback: Option<Address>,
+    pub has_migration_callback: bool,
+    pub migration_callback: Address,
 }
 
 // ---------------------------------------------------------------------------
@@ -335,8 +337,10 @@ pub struct CheckpointConfig {
 pub struct CheckpointAssetState {
     pub asset_code: String,
     pub health: AssetHealth,
-    pub latest_price: Option<PriceRecord>,
-    pub health_result: Option<HealthScoreResult>,
+    pub has_latest_price: bool,
+    pub latest_price: PriceRecord,
+    pub has_health_result: bool,
+    pub health_result: HealthScoreResult,
 }
 
 /// Full checkpoint snapshot used for historical analysis and restore.
@@ -798,7 +802,7 @@ impl BridgeWatchContract {
         env.storage().instance().set(&DataKey::SignerList, &signers);
 
         env.events()
-            .publish((symbol_short!("signer_reg"), signer_id), true);
+            .publish((symbol_short!("sgnr_reg"), signer_id), true);
     }
 
     /// Remove a signer from active set (soft delete).
@@ -814,7 +818,7 @@ impl BridgeWatchContract {
             .set(&DataKey::Signer(signer_id.clone()), &signer);
 
         env.events()
-            .publish((symbol_short!("signer_rem"), signer_id), true);
+            .publish((symbol_short!("sgnr_rem"), signer_id), true);
     }
 
     /// Set the minimum required signatures for multi-sig verification.
@@ -856,7 +860,7 @@ impl BridgeWatchContract {
         if env
             .storage()
             .instance()
-            .get::<DataKey, bool>(&DataKey::SignatureCache(payload_hash))
+            .get::<DataKey, bool>(&DataKey::SignatureCache(payload_hash.clone()))
             .unwrap_or(false)
         {
             return true;
@@ -874,13 +878,8 @@ impl BridgeWatchContract {
         let mut data = Bytes::new(&env);
         data.append(&message);
 
-        let signer_str = signature.signer_id.to_string();
-        let signer_bytes = signer_str.as_bytes();
-        let mut i = 0;
-        while i < signer_bytes.len() {
-            data.push_back(signer_bytes[i]);
-            i += 1;
-        }
+        let signer_id_bytes = Self::str_to_bytes_inner(&env, &signature.signer_id);
+        data.append(&signer_id_bytes);
 
         Self::append_bytesn(&mut data, &signer.public_key);
         Self::append_u64(&mut data, signature.nonce);
@@ -927,7 +926,7 @@ impl BridgeWatchContract {
 
         for s in signatures.iter() {
             for o in seen.iter() {
-                if o == &s.signer_id {
+                if o == s.signer_id {
                     panic!("duplicate signer in multi-sig");
                 }
             }
@@ -991,22 +990,12 @@ impl BridgeWatchContract {
         Self::check_permission(&env, &caller, AdminRole::PriceSubmitter);
 
         let mut message = Bytes::new(&env);
-        let asset_str = asset_code.to_string();
-        let asset_bytes = asset_str.as_bytes();
-        let mut i = 0;
-        while i < asset_bytes.len() {
-            message.push_back(asset_bytes[i]);
-            i += 1;
-        }
+        let asset_code_bytes = Self::str_to_bytes_inner(&env, &asset_code);
+        message.append(&asset_code_bytes);
         Self::append_u64(&mut message, price as u64);
 
-        let source_str = source.to_string();
-        let source_bytes = source_str.as_bytes();
-        i = 0;
-        while i < source_bytes.len() {
-            message.push_back(source_bytes[i]);
-            i += 1;
-        }
+        let source_bytes = Self::str_to_bytes_inner(&env, &source);
+        message.append(&source_bytes);
 
         Self::verify_signature(env.clone(), message, signature);
 
@@ -1050,13 +1039,8 @@ impl BridgeWatchContract {
         bridge_uptime_score: u32,
     ) -> Bytes {
         let mut data = Bytes::new(env);
-        let code = asset_code.to_string();
-        let code_bytes = code.as_bytes();
-        let mut i = 0;
-        while i < code_bytes.len() {
-            data.push_back(code_bytes[i]);
-            i += 1;
-        }
+        let code_bytes = Self::str_to_bytes_inner(env, asset_code);
+        data.append(&code_bytes);
 
         Self::append_u32(&mut data, health_score);
         Self::append_u32(&mut data, liquidity_score);
@@ -2539,12 +2523,14 @@ impl BridgeWatchContract {
             executed_by: caller.clone(),
             from_version,
             to_version,
-            from_wasm_hash,
+            has_from_wasm_hash: from_wasm_hash.is_some(),
+            from_wasm_hash: from_wasm_hash.unwrap_or(BytesN::from_array(&env, &[0u8; 32])),
             to_wasm_hash: proposal.new_wasm_hash,
             executed_at: now,
             emergency: proposal.emergency,
             is_rollback: proposal.is_rollback,
-            migration_callback: proposal.migration_callback,
+            has_migration_callback: proposal.migration_callback.is_some(),
+            migration_callback: proposal.migration_callback.unwrap_or(env.current_contract_address()),
         });
         env.storage()
             .persistent()
@@ -3546,26 +3532,25 @@ impl BridgeWatchContract {
                 &asset.health,
             );
 
-            match asset.latest_price {
-                Some(price) => env
-                    .storage()
+            if asset.has_latest_price {
+                env.storage()
                     .persistent()
-                    .set(&DataKey::PriceRecord(asset.asset_code.clone()), &price),
-                None => env
-                    .storage()
+                    .set(&DataKey::PriceRecord(asset.asset_code.clone()), &asset.latest_price);
+            } else {
+                env.storage()
                     .persistent()
-                    .remove(&DataKey::PriceRecord(asset.asset_code.clone())),
+                    .remove(&DataKey::PriceRecord(asset.asset_code.clone()));
             }
 
-            match asset.health_result {
-                Some(result) => env.storage().persistent().set(
+            if asset.has_health_result {
+                env.storage().persistent().set(
                     &DataKey::HealthScoreResult(asset.asset_code.clone()),
-                    &result,
-                ),
-                None => env
-                    .storage()
+                    &asset.health_result,
+                );
+            } else {
+                env.storage()
                     .persistent()
-                    .remove(&DataKey::HealthScoreResult(asset.asset_code.clone())),
+                    .remove(&DataKey::HealthScoreResult(asset.asset_code.clone()));
             }
         }
 
@@ -3590,6 +3575,15 @@ impl BridgeWatchContract {
             interval_secs: 86_400,
             max_checkpoints: 25,
             format_version: 1,
+        }
+    }
+
+    fn default_health_weights() -> HealthWeights {
+        HealthWeights {
+            liquidity_weight: 30,
+            price_stability_weight: 40,
+            bridge_uptime_weight: 30,
+            version: 1,
         }
     }
 
@@ -4174,20 +4168,37 @@ impl BridgeWatchContract {
 
         for asset_code in monitored_assets.iter() {
             let health = Self::load_asset_health(env, &asset_code);
-            let latest_price: Option<PriceRecord> = env
+            let latest_price_opt: Option<PriceRecord> = env
                 .storage()
                 .persistent()
                 .get(&DataKey::PriceRecord(asset_code.clone()));
-            let health_result: Option<HealthScoreResult> = env
+            let health_result_opt: Option<HealthScoreResult> = env
                 .storage()
                 .persistent()
                 .get(&DataKey::HealthScoreResult(asset_code.clone()));
 
+            let default_price = PriceRecord {
+                asset_code: asset_code.clone(),
+                price: 0,
+                source: String::from_str(env, ""),
+                timestamp: 0,
+            };
+            let default_result = HealthScoreResult {
+                composite_score: 0,
+                liquidity_score: 0,
+                price_stability_score: 0,
+                bridge_uptime_score: 0,
+                weights: Self::default_health_weights(),
+                timestamp: 0,
+            };
+
             assets.push_back(CheckpointAssetState {
                 asset_code,
                 health,
-                latest_price,
-                health_result,
+                has_latest_price: latest_price_opt.is_some(),
+                latest_price: latest_price_opt.unwrap_or(default_price),
+                has_health_result: health_result_opt.is_some(),
+                health_result: health_result_opt.unwrap_or(default_result),
             });
         }
 
@@ -4286,8 +4297,14 @@ impl BridgeWatchContract {
         for asset in snapshot.assets.iter() {
             Self::append_string(&mut data, &asset.asset_code);
             Self::append_asset_health(&mut data, &asset.health);
-            Self::append_option_price_record(&mut data, &asset.latest_price);
-            Self::append_option_health_score_result(&mut data, &asset.health_result);
+            Self::append_bool(&mut data, asset.has_latest_price);
+            if asset.has_latest_price {
+                Self::append_price_record(&mut data, &asset.latest_price);
+            }
+            Self::append_bool(&mut data, asset.has_health_result);
+            if asset.has_health_result {
+                Self::append_health_score_result(&mut data, &asset.health_result);
+            }
         }
 
         env.crypto().sha256(&data).into()
@@ -4399,14 +4416,26 @@ impl BridgeWatchContract {
     }
 
     fn append_string(buf: &mut Bytes, value: &String) {
-        let raw = value.to_string();
-        let bytes = raw.as_bytes();
-        Self::append_u32(buf, bytes.len() as u32);
+        let raw = Self::str_to_bytes_inner(value.env(), value);
+        Self::append_u32(buf, raw.len() as u32);
+        buf.append(&raw);
+    }
+
+    /// Convert a `soroban_sdk::String` to `Bytes` by copying its content.
+    fn str_to_bytes_inner(env: &Env, s: &String) -> Bytes {
+        let len = s.len() as usize;
+        // Use a fixed-size stack buffer; Soroban strings are bounded.
+        // Max practical length is well under 256 bytes for our use cases.
+        let mut buf = [0u8; 256];
+        let safe_len = len.min(256);
+        s.copy_into_slice(&mut buf[..safe_len]);
+        let mut result = Bytes::new(env);
         let mut i = 0;
-        while i < bytes.len() {
-            buf.push_back(bytes[i]);
+        while i < safe_len {
+            result.push_back(buf[i]);
             i += 1;
         }
+        result
     }
 
     fn append_option_u64(buf: &mut Bytes, value: Option<u64>) {
@@ -4452,6 +4481,13 @@ impl BridgeWatchContract {
         }
     }
 
+    fn append_price_record(buf: &mut Bytes, price: &PriceRecord) {
+        Self::append_string(buf, &price.asset_code);
+        Self::append_i128(buf, price.price);
+        Self::append_string(buf, &price.source);
+        Self::append_u64(buf, price.timestamp);
+    }
+
     fn append_option_health_score_result(buf: &mut Bytes, result: &Option<HealthScoreResult>) {
         match result {
             Some(value) => {
@@ -4468,6 +4504,18 @@ impl BridgeWatchContract {
             }
             None => Self::append_bool(buf, false),
         }
+    }
+
+    fn append_health_score_result(buf: &mut Bytes, value: &HealthScoreResult) {
+        Self::append_u32(buf, value.composite_score);
+        Self::append_u32(buf, value.liquidity_score);
+        Self::append_u32(buf, value.price_stability_score);
+        Self::append_u32(buf, value.bridge_uptime_score);
+        Self::append_u32(buf, value.weights.liquidity_weight);
+        Self::append_u32(buf, value.weights.price_stability_weight);
+        Self::append_u32(buf, value.weights.bridge_uptime_weight);
+        Self::append_u32(buf, value.weights.version);
+        Self::append_u64(buf, value.timestamp);
     }
 
     /// Load stored health weights or return defaults (30 / 40 / 30, v1).
@@ -5166,13 +5214,11 @@ mod tests {
         bridge_uptime_score: u32,
     ) -> Bytes {
         let mut data = Bytes::new(env);
-        let code = asset_code.to_string();
-        let code_bytes = code.as_bytes();
-        let mut i = 0;
-        while i < code_bytes.len() {
-            data.push_back(code_bytes[i]);
-            i += 1;
-        }
+        let len = asset_code.len() as usize;
+        let mut buf = [0u8; 256];
+        asset_code.copy_into_slice(&mut buf[..len.min(256)]);
+        let mut ci = 0;
+        while ci < len.min(256) { data.push_back(buf[ci]); ci += 1; }
 
         let hs = health_score.to_be_bytes();
         let mut j = 0;
@@ -5216,13 +5262,11 @@ mod tests {
         let mut data = Bytes::new(env);
         data.append(message);
 
-        let signer_str = signer_id.to_string();
-        let signer_bytes = signer_str.as_bytes();
-        let mut i = 0;
-        while i < signer_bytes.len() {
-            data.push_back(signer_bytes[i]);
-            i += 1;
-        }
+        let sid_len = signer_id.len() as usize;
+        let mut sid_buf = [0u8; 256];
+        signer_id.copy_into_slice(&mut sid_buf[..sid_len.min(256)]);
+        let mut si = 0;
+        while si < sid_len.min(256) { data.push_back(sid_buf[si]); si += 1; }
 
         let public_key_bytes = public_key.to_array();
         let mut j = 0;
