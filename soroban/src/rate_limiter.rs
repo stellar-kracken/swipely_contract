@@ -16,7 +16,9 @@
 //! - Support for different limit types (count-based, value-based)
 //! - Cross-contract limit enforcement
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Vec,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -421,7 +423,9 @@ impl RateLimiterContract {
         let daily_remaining_value = effective_limits.daily_value - daily_usage.value_used;
         let weekly_remaining_value = effective_limits.weekly_value - weekly_usage.value_used;
         let monthly_remaining_value = effective_limits.monthly_value - monthly_usage.value_used;
-        let daily_remaining_count = effective_limits.daily_count.saturating_sub(daily_usage.count_used);
+        let daily_remaining_count = effective_limits
+            .daily_count
+            .saturating_sub(daily_usage.count_used);
 
         let allowed = amount <= daily_remaining_value
             && amount <= weekly_remaining_value
@@ -490,37 +494,46 @@ impl RateLimiterContract {
         // --- Check per-user value limits ---
         if usage.daily.value_used + amount > effective_limits.daily_value {
             Self::handle_breach(&env, &user, &mut usage, now);
-            return Ok(ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32));
+            return Ok(ConsumeResult::Rejected(
+                RateLimitError::DailyValueLimitExceeded as u32,
+            ));
         }
         if usage.weekly.value_used + amount > effective_limits.weekly_value {
             Self::handle_breach(&env, &user, &mut usage, now);
-            return Ok(ConsumeResult::Rejected(RateLimitError::WeeklyValueLimitExceeded as u32));
+            return Ok(ConsumeResult::Rejected(
+                RateLimitError::WeeklyValueLimitExceeded as u32,
+            ));
         }
         if usage.monthly.value_used + amount > effective_limits.monthly_value {
             Self::handle_breach(&env, &user, &mut usage, now);
-            return Ok(ConsumeResult::Rejected(RateLimitError::MonthlyValueLimitExceeded as u32));
+            return Ok(ConsumeResult::Rejected(
+                RateLimitError::MonthlyValueLimitExceeded as u32,
+            ));
         }
 
         // --- Check per-user count limits ---
         if usage.daily.count_used + 1 > effective_limits.daily_count {
             Self::handle_breach(&env, &user, &mut usage, now);
-            return Ok(ConsumeResult::Rejected(RateLimitError::DailyCountLimitExceeded as u32));
+            return Ok(ConsumeResult::Rejected(
+                RateLimitError::DailyCountLimitExceeded as u32,
+            ));
         }
         if usage.weekly.count_used + 1 > effective_limits.weekly_count {
             Self::handle_breach(&env, &user, &mut usage, now);
-            return Ok(ConsumeResult::Rejected(RateLimitError::WeeklyCountLimitExceeded as u32));
+            return Ok(ConsumeResult::Rejected(
+                RateLimitError::WeeklyCountLimitExceeded as u32,
+            ));
         }
         if usage.monthly.count_used + 1 > effective_limits.monthly_count {
             Self::handle_breach(&env, &user, &mut usage, now);
-            return Ok(ConsumeResult::Rejected(RateLimitError::MonthlyCountLimitExceeded as u32));
+            return Ok(ConsumeResult::Rejected(
+                RateLimitError::MonthlyCountLimitExceeded as u32,
+            ));
         }
 
         // --- Check global limits ---
-        let mut global_usage: GlobalUsage = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalUsage)
-            .unwrap();
+        let mut global_usage: GlobalUsage =
+            env.storage().instance().get(&DataKey::GlobalUsage).unwrap();
         let global_limits: GlobalLimits = env
             .storage()
             .instance()
@@ -531,10 +544,14 @@ impl RateLimiterContract {
         global_usage.weekly = Self::decayed_usage(&global_usage.weekly, now, WEEK_SECS);
 
         if global_usage.daily.value_used + amount > global_limits.daily_value {
-            return Ok(ConsumeResult::Rejected(RateLimitError::GlobalDailyLimitExceeded as u32));
+            return Ok(ConsumeResult::Rejected(
+                RateLimitError::GlobalDailyLimitExceeded as u32,
+            ));
         }
         if global_usage.weekly.value_used + amount > global_limits.weekly_value {
-            return Ok(ConsumeResult::Rejected(RateLimitError::GlobalWeeklyLimitExceeded as u32));
+            return Ok(ConsumeResult::Rejected(
+                RateLimitError::GlobalWeeklyLimitExceeded as u32,
+            ));
         }
 
         // --- All checks passed — record consumption ---
@@ -638,18 +655,13 @@ impl RateLimiterContract {
     /// Add a user to the trusted whitelist (admin only).
     ///
     /// Whitelisted users receive limits multiplied by [`WHITELIST_MULTIPLIER`].
-    pub fn add_to_whitelist(
-        env: Env,
-        admin: Address,
-        user: Address,
-    ) -> Result<(), RateLimitError> {
+    pub fn add_to_whitelist(env: Env, admin: Address, user: Address) -> Result<(), RateLimitError> {
         Self::require_admin(&env, &admin)?;
         env.storage()
             .persistent()
             .set(&DataKey::Whitelist(user.clone()), &true);
 
-        env.events()
-            .publish((symbol_short!("rl_wl"), user), true);
+        env.events().publish((symbol_short!("rl_wl"), user), true);
         Ok(())
     }
 
@@ -664,8 +676,7 @@ impl RateLimiterContract {
             .persistent()
             .set(&DataKey::Whitelist(user.clone()), &false);
 
-        env.events()
-            .publish((symbol_short!("rl_wl"), user), false);
+        env.events().publish((symbol_short!("rl_wl"), user), false);
         Ok(())
     }
 
@@ -761,10 +772,7 @@ impl RateLimiterContract {
     }
 
     /// Reset the circuit breaker (admin only).
-    pub fn reset_circuit_breaker(
-        env: Env,
-        admin: Address,
-    ) -> Result<(), RateLimitError> {
+    pub fn reset_circuit_breaker(env: Env, admin: Address) -> Result<(), RateLimitError> {
         Self::require_admin(&env, &admin)?;
 
         let mut cb: CircuitBreakerState = env
@@ -803,8 +811,7 @@ impl RateLimiterContract {
             .instance()
             .set(&DataKey::EmergencyMode, &enabled);
 
-        env.events()
-            .publish((symbol_short!("rl_emrg"),), enabled);
+        env.events().publish((symbol_short!("rl_emrg"),), enabled);
         Ok(())
     }
 
@@ -870,11 +877,7 @@ impl RateLimiterContract {
     }
 
     /// Clear a user's cooldown early (admin only, e.g. after investigation).
-    pub fn clear_cooldown(
-        env: Env,
-        admin: Address,
-        user: Address,
-    ) -> Result<(), RateLimitError> {
+    pub fn clear_cooldown(env: Env, admin: Address, user: Address) -> Result<(), RateLimitError> {
         Self::require_admin(&env, &admin)?;
 
         let now = env.ledger().timestamp();
@@ -918,11 +921,7 @@ impl RateLimiterContract {
     /// Get the global protocol usage. Public read.
     pub fn get_global_usage(env: Env) -> GlobalUsage {
         let now = env.ledger().timestamp();
-        let mut gu: GlobalUsage = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalUsage)
-            .unwrap();
+        let mut gu: GlobalUsage = env.storage().instance().get(&DataKey::GlobalUsage).unwrap();
         gu.daily = Self::decayed_usage(&gu.daily, now, DAY_SECS);
         gu.weekly = Self::decayed_usage(&gu.weekly, now, WEEK_SECS);
         gu
@@ -1151,8 +1150,10 @@ impl RateLimiterContract {
             .persistent()
             .set(&DataKey::UserRisk(user.clone()), &profile);
 
-        env.events()
-            .publish((symbol_short!("rl_brch"), user.clone()), profile.breach_count);
+        env.events().publish(
+            (symbol_short!("rl_brch"), user.clone()),
+            profile.breach_count,
+        );
     }
 
     /// Append a daily usage record to the user's history.
@@ -1295,7 +1296,10 @@ mod tests {
 
         // Try to exceed the default daily limit in one go
         let result = client.consume_limit(&user, &(DEFAULT_DAILY_LIMIT + 1));
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32)
+        );
     }
 
     #[test]
@@ -1308,7 +1312,10 @@ mod tests {
 
         // The next transfer should fail
         let result = client.consume_limit(&user, &200);
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32)
+        );
     }
 
     #[test]
@@ -1369,7 +1376,10 @@ mod tests {
         // Clear cooldown from breaches that persisted via ConsumeResult
         client.clear_cooldown(&admin, &user);
         let result = client.consume_limit(&user, &500_000_000);
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::WeeklyValueLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::WeeklyValueLimitExceeded as u32)
+        );
 
         // After a full week, the weekly window resets
         client.clear_cooldown(&admin, &user);
@@ -1488,7 +1498,10 @@ mod tests {
 
         let user = Address::generate(&env);
         let result = client.consume_limit(&user, &(200_000_000 + 1));
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::GlobalDailyLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::GlobalDailyLimitExceeded as u32)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1526,7 +1539,10 @@ mod tests {
         client.add_to_whitelist(&admin, &user);
 
         let effective = client.get_effective_limits(&user);
-        assert_eq!(effective.daily_value, DEFAULT_DAILY_LIMIT * WHITELIST_MULTIPLIER);
+        assert_eq!(
+            effective.daily_value,
+            DEFAULT_DAILY_LIMIT * WHITELIST_MULTIPLIER
+        );
     }
 
     #[test]
@@ -1617,7 +1633,10 @@ mod tests {
 
         // Breach the daily limit — returns Ok(Rejected) so state persists
         let result = client.consume_limit(&user, &(DEFAULT_DAILY_LIMIT + 1));
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32)
+        );
 
         // Should be in cooldown (breach state was persisted)
         let result = client.try_consume_limit(&user, &100);
@@ -1630,7 +1649,10 @@ mod tests {
         let user = Address::generate(&env);
 
         let result = client.consume_limit(&user, &(DEFAULT_DAILY_LIMIT + 1));
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32)
+        );
 
         // Advance past cooldown + past daily window
         env.ledger()
@@ -1647,7 +1669,10 @@ mod tests {
 
         // Breach — state persists via Ok(Rejected)
         let result = client.consume_limit(&user, &(DEFAULT_DAILY_LIMIT + 1));
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32)
+        );
 
         // Advance 30 min — still within the 1-hour cooldown
         env.ledger().set_timestamp(1_000_000 + 1_800);
@@ -1674,7 +1699,10 @@ mod tests {
         // Breach to trigger cooldown — state persists via Ok(Rejected)
         let user = Address::generate(&env);
         let result = client.consume_limit(&user, &(DEFAULT_DAILY_LIMIT + 1));
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32)
+        );
 
         // After 1 hour, should still be in cooldown (2h duration)
         env.ledger().set_timestamp(1_000_000 + 3_601);
@@ -1912,8 +1940,7 @@ mod tests {
         client.consume_limit(&user, &100);
 
         // Advance 60 days (2 tenure intervals)
-        env.ledger()
-            .set_timestamp(1_000_000 + 60 * DAY_SECS);
+        env.ledger().set_timestamp(1_000_000 + 60 * DAY_SECS);
 
         let effective = client.get_effective_limits(&user);
         // 2 intervals × 5% = 10% bonus → 110% of default
@@ -1932,7 +1959,10 @@ mod tests {
 
         // Trigger a breach — state persists via Ok(Rejected)
         let result = client.consume_limit(&user, &(DEFAULT_DAILY_LIMIT + 1));
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32)
+        );
 
         let risk = client.get_user_risk(&user);
         assert_eq!(risk.breach_count, 1);
@@ -1963,7 +1993,10 @@ mod tests {
         client.consume_limit(&user, &1);
 
         let result = client.consume_limit(&user, &1);
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::DailyCountLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::DailyCountLimitExceeded as u32)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2031,9 +2064,13 @@ mod tests {
         client.consume_limit(&user, &400_000_000);
 
         // Monthly total: 2.4B. Next transfer of 200M would exceed 2.5B
-        env.ledger().set_timestamp(1_000_000 + WEEK_SECS + DAY_SECS + 1);
+        env.ledger()
+            .set_timestamp(1_000_000 + WEEK_SECS + DAY_SECS + 1);
         client.clear_cooldown(&admin, &user);
         let result = client.consume_limit(&user, &200_000_000);
-        assert_eq!(result, ConsumeResult::Rejected(RateLimitError::MonthlyValueLimitExceeded as u32));
+        assert_eq!(
+            result,
+            ConsumeResult::Rejected(RateLimitError::MonthlyValueLimitExceeded as u32)
+        );
     }
 }

@@ -133,7 +133,9 @@ impl TransferStateMachine {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::TransferSeq, &0u64);
-        env.storage().instance().set(&DataKey::DefaultTimeoutSecs, &86_400u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultTimeoutSecs, &86_400u64);
         // Sensible defaults per state (seconds). All configurable via `set_state_timeout`.
         Self::seed_default_timeouts(&env);
         // Placeholder zero addresses until `set_integration_contracts`.
@@ -158,9 +160,15 @@ impl TransferStateMachine {
         oracle: Address,
     ) {
         Self::assert_admin(&env, &caller);
-        env.storage().instance().set(&DataKey::EscrowContract, &escrow);
-        env.storage().instance().set(&DataKey::VerifierContract, &verifier);
-        env.storage().instance().set(&DataKey::OracleContract, &oracle);
+        env.storage()
+            .instance()
+            .set(&DataKey::EscrowContract, &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::VerifierContract, &verifier);
+        env.storage()
+            .instance()
+            .set(&DataKey::OracleContract, &oracle);
     }
 
     pub fn set_default_timeout(env: Env, caller: Address, secs: u64) {
@@ -179,7 +187,9 @@ impl TransferStateMachine {
         if secs == 0 {
             panic!("timeout must be positive");
         }
-        env.storage().instance().set(&DataKey::Timeout(state), &secs);
+        env.storage()
+            .instance()
+            .set(&DataKey::Timeout(state), &secs);
     }
 
     /// Start a new transfer; initial state is always [`TransferState::Initiated`].
@@ -226,7 +236,9 @@ impl TransferStateMachine {
 
         env.storage().persistent().set(&DataKey::Transfer(id), &t);
         let empty: Vec<StateTransitionLog> = Vec::new(&env);
-        env.storage().persistent().set(&DataKey::History(id), &empty);
+        env.storage()
+            .persistent()
+            .set(&DataKey::History(id), &empty);
 
         env.events().publish((EVT_INIT, id), t.state.clone());
 
@@ -268,7 +280,14 @@ impl TransferStateMachine {
         }
         Self::assert_advance_auth(&env, &caller, &t, &from, &next);
 
-        Self::apply_transition(&env, &mut t, &caller, &from, &next, String::from_str(&env, ""));
+        Self::apply_transition(
+            &env,
+            &mut t,
+            &caller,
+            &from,
+            &next,
+            String::from_str(&env, ""),
+        );
     }
 
     /// If the current state's deadline has passed, move to [`TransferState::TimedOut`] (terminal).
@@ -391,7 +410,9 @@ impl TransferStateMachine {
         }
         t.verification_ok = ok;
         t.updated_at = env.ledger().timestamp();
-        env.storage().persistent().set(&DataKey::Transfer(transfer_id), &t);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Transfer(transfer_id), &t);
         env.events().publish((EVT_VRF, transfer_id), ok);
     }
 
@@ -416,7 +437,9 @@ impl TransferStateMachine {
         }
         t.oracle_ok = ok;
         t.updated_at = env.ledger().timestamp();
-        env.storage().persistent().set(&DataKey::Transfer(transfer_id), &t);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Transfer(transfer_id), &t);
         env.events().publish((EVT_ORC, transfer_id), ok);
     }
 
@@ -512,10 +535,7 @@ impl TransferStateMachine {
 
     fn is_terminal(s: &TransferState) -> bool {
         use TransferState::*;
-        matches!(
-            s,
-            Completed | Failed | RolledBack | TimedOut
-        )
+        matches!(s, Completed | Failed | RolledBack | TimedOut)
     }
 
     fn can_rollback_from(s: &TransferState) -> bool {
@@ -583,16 +603,16 @@ impl TransferStateMachine {
 
     fn admin_override_allowed(from: &TransferState, to: &TransferState) -> bool {
         use TransferState::*;
-        match (from, to) {
-            (&TimedOut, &Failed) => true,
-            (&TimedOut, &RolledBack) => true,
-            (&TimedOut, &EscrowLocked) => true,
-            (&TimedOut, &ReleasePending) => true,
-            (&Failed, &RollingBack) => true,
-            (&OraclePending, &ReleasePending) => true,
-            (&VerificationPending, &OraclePending) => true,
-            _ => false,
-        }
+        matches!(
+            (from, to),
+            (&TimedOut, &Failed)
+                | (&TimedOut, &RolledBack)
+                | (&TimedOut, &EscrowLocked)
+                | (&TimedOut, &ReleasePending)
+                | (&Failed, &RollingBack)
+                | (&OraclePending, &ReleasePending)
+                | (&VerificationPending, &OraclePending)
+        )
     }
 
     fn assert_advance_auth(
@@ -677,9 +697,12 @@ impl TransferStateMachine {
             actor: actor.clone(),
             note,
         });
-        env.storage().persistent().set(&DataKey::History(t.id), &hist);
+        env.storage()
+            .persistent()
+            .set(&DataKey::History(t.id), &hist);
 
-        env.events().publish((EVT_ADV, t.id), (from.clone(), to.clone()));
+        env.events()
+            .publish((EVT_ADV, t.id), (from.clone(), to.clone()));
     }
 
     fn is_admin(env: &Env, caller: &Address) -> bool {
@@ -740,7 +763,11 @@ mod tests {
 
         let t = client.get_transfer(&id).unwrap();
         assert_eq!(t.state, TransferState::Initiated);
-        assert!(client.verify_transition(&id, &TransferState::Initiated, &TransferState::AwaitingSource));
+        assert!(client.verify_transition(
+            &id,
+            &TransferState::Initiated,
+            &TransferState::AwaitingSource
+        ));
 
         client.advance_state(&user, &id, &TransferState::AwaitingSource);
         client.advance_state(&user, &id, &TransferState::EscrowPending);
@@ -777,7 +804,11 @@ mod tests {
             &500i128,
             &String::from_str(&env, "memo"),
         );
-        assert!(client.verify_transition(&id, &TransferState::Initiated, &TransferState::EscrowPending));
+        assert!(client.verify_transition(
+            &id,
+            &TransferState::Initiated,
+            &TransferState::EscrowPending
+        ));
         client.advance_state(&user, &id, &TransferState::EscrowPending);
     }
 
@@ -793,7 +824,11 @@ mod tests {
             &1i128,
             &String::from_str(&env, "d"),
         );
-        assert!(!client.verify_transition(&id, &TransferState::Initiated, &TransferState::EscrowPending));
+        assert!(!client.verify_transition(
+            &id,
+            &TransferState::Initiated,
+            &TransferState::EscrowPending
+        ));
     }
 
     #[test]
@@ -851,11 +886,7 @@ mod tests {
         client.advance_state(&user, &id, &TransferState::AwaitingSource);
         client.advance_state(&user, &id, &TransferState::EscrowPending);
         client.advance_state(&escrow, &id, &TransferState::EscrowLocked);
-        client.rollback_transfer(
-            &user,
-            &id,
-            &String::from_str(&env, "user requested"),
-        );
+        client.rollback_transfer(&user, &id, &String::from_str(&env, "user requested"));
         assert_eq!(
             client.get_transfer(&id).unwrap().state,
             TransferState::RolledBack
@@ -923,7 +954,10 @@ mod tests {
             &String::from_str(&env, "d"),
         );
         client.advance_state(&user, &id, &TransferState::Failed);
-        assert_eq!(client.get_transfer(&id).unwrap().state, TransferState::Failed);
+        assert_eq!(
+            client.get_transfer(&id).unwrap().state,
+            TransferState::Failed
+        );
     }
 
     #[test]
@@ -1078,11 +1112,7 @@ mod tests {
         client.advance_state(&user, &id, &TransferState::AwaitingSource);
         client.advance_state(&user, &id, &TransferState::EscrowPending);
         client.advance_state(&escrow, &id, &TransferState::EscrowLocked);
-        client.rollback_transfer(
-            &stranger,
-            &id,
-            &String::from_str(&env, "no"),
-        );
+        client.rollback_transfer(&stranger, &id, &String::from_str(&env, "no"));
     }
 
     #[test]

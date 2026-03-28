@@ -227,6 +227,7 @@ pub enum LiquidityKey {
 ///
 /// # Panics
 /// Caller must have already verified admin authorisation before invoking this.
+#[allow(clippy::too_many_arguments)]
 pub fn record_pool_state(
     env: &Env,
     pool_id: String,
@@ -313,11 +314,7 @@ pub fn record_pool_state(
 /// computes volume, average depth, price change, fees, and an annualised fee APR.
 pub fn calculate_pool_metrics(env: &Env, pool_id: String, window_secs: u64) -> PoolMetrics {
     let now = env.ledger().timestamp();
-    let window_start = if now > window_secs {
-        now - window_secs
-    } else {
-        0
-    };
+    let window_start = now.saturating_sub(window_secs);
 
     let snapshots = get_snapshots_in_window(env, &pool_id, window_start, now);
 
@@ -590,12 +587,7 @@ fn get_latest_snapshot(env: &Env, pool_id: &String) -> Option<PoolSnapshot> {
 }
 
 /// Collect all snapshots in a time window, ordered oldest-first.
-fn get_snapshots_in_window(
-    env: &Env,
-    pool_id: &String,
-    from: u64,
-    to: u64,
-) -> Vec<PoolSnapshot> {
+fn get_snapshots_in_window(env: &Env, pool_id: &String, from: u64, to: u64) -> Vec<PoolSnapshot> {
     let meta: RingBufferMeta = env
         .storage()
         .persistent()
@@ -738,10 +730,7 @@ fn check_significant_change(env: &Env, prev: &PoolSnapshot, curr: &PoolSnapshot)
 
     if change_bps >= SIGNIFICANT_CHANGE_BPS as i128 {
         env.events().publish(
-            (
-                curr.pool_id.clone(),
-                soroban_sdk::symbol_short!("liq_chg"),
-            ),
+            (curr.pool_id.clone(), soroban_sdk::symbol_short!("liq_chg")),
             (change_bps, curr.timestamp),
         );
     }

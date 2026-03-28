@@ -1,6 +1,5 @@
-use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, String, Vec,
-};
+#![allow(clippy::too_many_arguments)]
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec};
 
 /// Reputation score ranges from 0 to 10000 (represents 0.00 to 100.00%)
 pub const REPUTATION_SCALE: u32 = 10000;
@@ -157,6 +156,7 @@ pub struct LeaderboardEntry {
 #[contract]
 pub struct ReputationSystemContract;
 
+#[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl ReputationSystemContract {
     /// Initialize the reputation system contract
@@ -164,20 +164,35 @@ impl ReputationSystemContract {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Config, &config);
-        
+
         // Initialize empty leaderboards
         let bridge_leaderboard: Vec<LeaderboardEntry> = Vec::new(&env);
         let oracle_leaderboard: Vec<LeaderboardEntry> = Vec::new(&env);
         let relay_leaderboard: Vec<LeaderboardEntry> = Vec::new(&env);
-        
-        env.storage().instance().set(&DataKey::ReputationLeaderboard(EntityType::BridgeOperator), &bridge_leaderboard);
-        env.storage().instance().set(&DataKey::ReputationLeaderboard(EntityType::OracleNode), &oracle_leaderboard);
-        env.storage().instance().set(&DataKey::ReputationLeaderboard(EntityType::RelayOperator), &relay_leaderboard);
-        
+
+        env.storage().instance().set(
+            &DataKey::ReputationLeaderboard(EntityType::BridgeOperator),
+            &bridge_leaderboard,
+        );
+        env.storage().instance().set(
+            &DataKey::ReputationLeaderboard(EntityType::OracleNode),
+            &oracle_leaderboard,
+        );
+        env.storage().instance().set(
+            &DataKey::ReputationLeaderboard(EntityType::RelayOperator),
+            &relay_leaderboard,
+        );
+
         // Initialize entity counters
-        env.storage().instance().set(&DataKey::TotalEntities(EntityType::BridgeOperator), &0u64);
-        env.storage().instance().set(&DataKey::TotalEntities(EntityType::OracleNode), &0u64);
-        env.storage().instance().set(&DataKey::TotalEntities(EntityType::RelayOperator), &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalEntities(EntityType::BridgeOperator), &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalEntities(EntityType::OracleNode), &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalEntities(EntityType::RelayOperator), &0u64);
     }
 
     /// Register a new entity in the reputation system
@@ -188,16 +203,20 @@ impl ReputationSystemContract {
         stake_amount: i128,
     ) {
         // Check if entity already exists
-        if env.storage().persistent().has(&DataKey::Reputation(entity_address.clone())) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Reputation(entity_address.clone()))
+        {
             panic!("Entity already registered");
         }
-        
+
         // Validate stake amount
         let config: Config = env.storage().instance().get(&DataKey::Config).unwrap();
         if stake_amount < config.min_stake_amount {
             panic!("Stake amount below minimum requirement");
         }
-        
+
         // Create initial reputation data
         let reputation_data = ReputationData {
             entity_address: entity_address.clone(),
@@ -219,21 +238,38 @@ impl ReputationSystemContract {
             is_slashed: false,
             badge_level: BadgeLevel::None,
         };
-        
+
         // Store reputation data
-        env.storage().persistent().set(&DataKey::Reputation(entity_address.clone()), &reputation_data);
-        
+        env.storage().persistent().set(
+            &DataKey::Reputation(entity_address.clone()),
+            &reputation_data,
+        );
+
         // Initialize empty performance history
         let history: Vec<PerformanceRecord> = Vec::new(&env);
-        env.storage().persistent().set(&DataKey::PerformanceHistory(entity_address.clone()), &history);
-        
+        env.storage().persistent().set(
+            &DataKey::PerformanceHistory(entity_address.clone()),
+            &history,
+        );
+
         // Update entity counter
-        let mut total_entities: u64 = env.storage().instance().get(&DataKey::TotalEntities(entity_type.clone())).unwrap();
+        let mut total_entities: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalEntities(entity_type.clone()))
+            .unwrap();
         total_entities += 1;
-        env.storage().instance().set(&DataKey::TotalEntities(entity_type), &total_entities);
-        
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalEntities(entity_type), &total_entities);
+
         // Add to leaderboard
-        Self::update_leaderboard_internal(&env, entity_address, reputation_data.overall_score, BadgeLevel::None);
+        Self::update_leaderboard_internal(
+            &env,
+            entity_address,
+            reputation_data.overall_score,
+            BadgeLevel::None,
+        );
     }
 
     /// Record performance metrics for an entity
@@ -250,13 +286,14 @@ impl ReputationSystemContract {
     ) {
         // Require authorization from entity
         entity_address.require_auth();
-        
+
         // Get existing reputation data
-        let mut reputation_data: ReputationData = env.storage()
+        let reputation_data: ReputationData = env
+            .storage()
             .persistent()
             .get(&DataKey::Reputation(entity_address.clone()))
             .unwrap_or_else(|| panic!("Entity not registered"));
-        
+
         // Create performance record
         let record = PerformanceRecord {
             timestamp: env.ledger().timestamp(),
@@ -271,20 +308,21 @@ impl ReputationSystemContract {
             penalty_amount: 0,
             reward_amount: 0,
         };
-        
+
         // Store performance record
-        let mut history: Vec<PerformanceRecord> = env.storage()
+        let mut history: Vec<PerformanceRecord> = env
+            .storage()
             .persistent()
             .get(&DataKey::PerformanceHistory(entity_address.clone()))
             .unwrap_or_else(|| Vec::new(&env));
-        
+
         history.push_back(record);
-        
+
         // Keep only recent history (apply time decay cleanup)
         if history.len() > MAX_HISTORY_RECORDS {
             let mut cleaned_history: Vec<PerformanceRecord> = Vec::new(&env);
             let cutoff_time = env.ledger().timestamp().saturating_sub(365 * 24 * 60 * 60); // Keep last year
-            
+
             for i in 0..history.len() {
                 let record = history.get(i).unwrap();
                 if record.timestamp >= cutoff_time {
@@ -293,66 +331,83 @@ impl ReputationSystemContract {
             }
             history = cleaned_history;
         }
-        
-        env.storage().persistent().set(&DataKey::PerformanceHistory(entity_address.clone()), &history);
-        
+
+        env.storage().persistent().set(
+            &DataKey::PerformanceHistory(entity_address.clone()),
+            &history,
+        );
+
         // Update reputation scores
-        Self::update_reputation_internal(&env, entity_address.clone(), accuracy, uptime, response_time, disputes_won, disputes_lost);
-        
+        Self::update_reputation_internal(
+            &env,
+            entity_address.clone(),
+            accuracy,
+            uptime,
+            response_time,
+            disputes_won,
+            disputes_lost,
+        );
+
         // Update entity statistics
-        let mut updated_data: ReputationData = env.storage()
+        let mut updated_data: ReputationData = env
+            .storage()
             .persistent()
             .get(&DataKey::Reputation(entity_address.clone()))
             .unwrap();
-        
+
         updated_data.total_operations += total_operations as u64;
         updated_data.successful_operations += successful_operations as u64;
         updated_data.last_update_time = env.ledger().timestamp();
-        
+
         // Update badge level based on reputation
         updated_data.badge_level = Self::calculate_badge_level(updated_data.overall_score);
-        
-        env.storage().persistent().set(&DataKey::Reputation(entity_address), &updated_data);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reputation(entity_address), &updated_data);
     }
 
     /// Apply penalty to an entity (admin only)
-    pub fn apply_penalty(
-        env: Env,
-        entity_address: Address,
-        penalty_amount: i128,
-        reason: String,
-    ) {
+    pub fn apply_penalty(env: Env, entity_address: Address, penalty_amount: i128, _reason: String) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        
+
         // Get existing reputation data
-        let mut reputation_data: ReputationData = env.storage()
+        let mut reputation_data: ReputationData = env
+            .storage()
             .persistent()
             .get(&DataKey::Reputation(entity_address.clone()))
             .unwrap_or_else(|| panic!("Entity not registered"));
-        
+
         // Calculate reputation impact
         let config: Config = env.storage().instance().get(&DataKey::Config).unwrap();
         let reputation_impact = (penalty_amount as u32) * config.slashing_percentage / 100;
-        let new_score = reputation_data.overall_score.saturating_sub(reputation_impact);
-        
+        let new_score = reputation_data
+            .overall_score
+            .saturating_sub(reputation_impact);
+
         // Update reputation data
         reputation_data.overall_score = new_score;
         reputation_data.total_penalties += penalty_amount;
-        reputation_data.current_stake = reputation_data.current_stake.saturating_sub(penalty_amount);
+        reputation_data.current_stake =
+            reputation_data.current_stake.saturating_sub(penalty_amount);
         reputation_data.is_slashed = true;
         reputation_data.badge_level = BadgeLevel::None; // Reset badge on penalty
         reputation_data.last_update_time = env.ledger().timestamp();
-        
+
         // Update stored data
-        env.storage().persistent().set(&DataKey::Reputation(entity_address.clone()), &reputation_data);
-        
+        env.storage().persistent().set(
+            &DataKey::Reputation(entity_address.clone()),
+            &reputation_data,
+        );
+
         // Add penalty record to history
-        let mut history: Vec<PerformanceRecord> = env.storage()
+        let mut history: Vec<PerformanceRecord> = env
+            .storage()
             .persistent()
             .get(&DataKey::PerformanceHistory(entity_address.clone()))
             .unwrap_or_else(|| Vec::new(&env));
-        
+
         let penalty_record = PerformanceRecord {
             timestamp: env.ledger().timestamp(),
             entity_type: reputation_data.entity_type.clone(),
@@ -366,56 +421,58 @@ impl ReputationSystemContract {
             penalty_amount,
             reward_amount: 0,
         };
-        
+
         history.push_back(penalty_record);
-        env.storage().persistent().set(&DataKey::Reputation(entity_address.clone()), &history);
-        
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reputation(entity_address.clone()), &history);
+
         // Update leaderboard
         Self::update_leaderboard_internal(&env, entity_address, new_score, BadgeLevel::None);
     }
 
     /// Grant reward to an entity (admin only)
-    pub fn grant_reward(
-        env: Env,
-        entity_address: Address,
-        reward_amount: i128,
-        reason: String,
-    ) {
+    pub fn grant_reward(env: Env, entity_address: Address, reward_amount: i128, _reason: String) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        
+
         // Get existing reputation data
-        let mut reputation_data: ReputationData = env.storage()
+        let mut reputation_data: ReputationData = env
+            .storage()
             .persistent()
             .get(&DataKey::Reputation(entity_address.clone()))
             .unwrap_or_else(|| panic!("Entity not registered"));
-        
+
         // Calculate reputation boost
         let config: Config = env.storage().instance().get(&DataKey::Config).unwrap();
         let reputation_boost = (reward_amount as u32) * config.reward_percentage / 100;
         let new_score = (reputation_data.overall_score + reputation_boost).min(REPUTATION_SCALE);
-        
+
         // Update reputation data
         reputation_data.overall_score = new_score;
         reputation_data.total_rewards += reward_amount;
         reputation_data.current_stake += reward_amount;
         reputation_data.last_update_time = env.ledger().timestamp();
-        
+
         // Check if entity can recover from slashed status
         if reputation_data.is_slashed && new_score >= MIN_REPUTATION_THRESHOLD {
             reputation_data.is_slashed = false;
             reputation_data.badge_level = Self::calculate_badge_level(new_score);
         }
-        
+
         // Update stored data
-        env.storage().persistent().set(&DataKey::Reputation(entity_address.clone()), &reputation_data);
-        
+        env.storage().persistent().set(
+            &DataKey::Reputation(entity_address.clone()),
+            &reputation_data,
+        );
+
         // Add reward record to history
-        let mut history: Vec<PerformanceRecord> = env.storage()
+        let mut history: Vec<PerformanceRecord> = env
+            .storage()
             .persistent()
             .get(&DataKey::PerformanceHistory(entity_address.clone()))
             .unwrap_or_else(|| Vec::new(&env));
-        
+
         let reward_record = PerformanceRecord {
             timestamp: env.ledger().timestamp(),
             entity_type: reputation_data.entity_type.clone(),
@@ -429,55 +486,77 @@ impl ReputationSystemContract {
             penalty_amount: 0,
             reward_amount,
         };
-        
+
         history.push_back(reward_record);
-        env.storage().persistent().set(&DataKey::Reputation(entity_address.clone()), &history);
-        
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reputation(entity_address.clone()), &history);
+
         // Update leaderboard
-        Self::update_leaderboard_internal(&env, entity_address, new_score, reputation_data.badge_level);
+        Self::update_leaderboard_internal(
+            &env,
+            entity_address,
+            new_score,
+            reputation_data.badge_level,
+        );
     }
 
     /// Calculate and apply time decay to all entities
     pub fn apply_time_decay(env: Env) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        
+
         let config: Config = env.storage().instance().get(&DataKey::Config).unwrap();
         if !config.decay_enabled {
             return;
         }
-        
+
         let current_time = env.ledger().timestamp();
-        
+
         // Apply decay to all entity types
-        for entity_type in [EntityType::BridgeOperator, EntityType::OracleNode, EntityType::RelayOperator] {
-            let leaderboard: Vec<LeaderboardEntry> = env.storage()
+        for entity_type in [
+            EntityType::BridgeOperator,
+            EntityType::OracleNode,
+            EntityType::RelayOperator,
+        ] {
+            let leaderboard: Vec<LeaderboardEntry> = env
+                .storage()
                 .instance()
                 .get(&DataKey::ReputationLeaderboard(entity_type))
                 .unwrap_or_else(|| Vec::new(&env));
-            
+
             for i in 0..leaderboard.len() {
                 let entry = leaderboard.get(i).unwrap();
-                let mut reputation_data: ReputationData = env.storage()
+                let mut reputation_data: ReputationData = env
+                    .storage()
                     .persistent()
                     .get(&DataKey::Reputation(entry.entity_address.clone()))
                     .unwrap();
-                
+
                 // Calculate time-based decay
                 let time_since_update = current_time - reputation_data.last_update_time;
                 let decay_factor = Self::calculate_decay_factor(time_since_update);
-                let decayed_score = ((reputation_data.overall_score as u64) * decay_factor as u64 / REPUTATION_SCALE as u64) as u32;
-                
+                let decayed_score = ((reputation_data.overall_score as u64) * decay_factor as u64
+                    / REPUTATION_SCALE as u64) as u32;
+
                 // Only update if score changed
                 if decayed_score != reputation_data.overall_score {
                     reputation_data.overall_score = decayed_score;
                     reputation_data.badge_level = Self::calculate_badge_level(decayed_score);
                     reputation_data.last_update_time = current_time;
-                    
-                    env.storage().persistent().set(&DataKey::Reputation(entry.entity_address.clone()), &reputation_data);
-                    
+
+                    env.storage().persistent().set(
+                        &DataKey::Reputation(entry.entity_address.clone()),
+                        &reputation_data,
+                    );
+
                     // Update leaderboard entry
-                    Self::update_leaderboard_internal(&env, entry.entity_address, decayed_score, reputation_data.badge_level);
+                    Self::update_leaderboard_internal(
+                        &env,
+                        entry.entity_address,
+                        decayed_score,
+                        reputation_data.badge_level,
+                    );
                 }
             }
         }
@@ -485,7 +564,9 @@ impl ReputationSystemContract {
 
     /// Get reputation data for an entity
     pub fn get_reputation(env: Env, entity_address: Address) -> Option<ReputationData> {
-        env.storage().persistent().get(&DataKey::Reputation(entity_address))
+        env.storage()
+            .persistent()
+            .get(&DataKey::Reputation(entity_address))
     }
 
     /// Get performance history for an entity
@@ -498,13 +579,14 @@ impl ReputationSystemContract {
 
     /// Get leaderboard for a specific entity type
     pub fn get_leaderboard(env: Env, entity_type: EntityType, limit: u32) -> Vec<LeaderboardEntry> {
-        let mut leaderboard: Vec<LeaderboardEntry> = env.storage()
+        let mut leaderboard: Vec<LeaderboardEntry> = env
+            .storage()
             .instance()
             .get(&DataKey::ReputationLeaderboard(entity_type))
             .unwrap_or_else(|| Vec::new(&env));
-        
+
         // Sort by score descending (simple bubble sort for small lists)
-        let len = leaderboard.len() as u32;
+        let len = leaderboard.len();
         for i in 0..len {
             for j in 0..len - i - 1 {
                 let score_j = leaderboard.get(j).unwrap().score;
@@ -518,27 +600,30 @@ impl ReputationSystemContract {
                 }
             }
         }
-        
+
         // Return limited results
         let mut result: Vec<LeaderboardEntry> = Vec::new(&env);
         let max_entries = limit.min(len);
         for i in 0..max_entries {
             result.push_back(leaderboard.get(i).unwrap());
         }
-        
+
         result
     }
 
     /// Check if entity meets minimum reputation threshold for access control
-    pub fn check_access_control(env: Env, entity_address: Address, required_threshold: u32) -> bool {
-        let reputation_data: Option<ReputationData> = env.storage()
+    pub fn check_access_control(
+        env: Env,
+        entity_address: Address,
+        required_threshold: u32,
+    ) -> bool {
+        let reputation_data: Option<ReputationData> = env
+            .storage()
             .persistent()
             .get(&DataKey::Reputation(entity_address));
-        
+
         match reputation_data {
-            Some(data) => {
-                !data.is_slashed && data.overall_score >= required_threshold
-            }
+            Some(data) => !data.is_slashed && data.overall_score >= required_threshold,
             None => false,
         }
     }
@@ -547,17 +632,17 @@ impl ReputationSystemContract {
     pub fn update_config(env: Env, new_config: Config) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        
+
         // Validate weights sum to 100
-        let total_weight = new_config.weights.accuracy_weight 
-            + new_config.weights.uptime_weight 
-            + new_config.weights.response_time_weight 
+        let total_weight = new_config.weights.accuracy_weight
+            + new_config.weights.uptime_weight
+            + new_config.weights.response_time_weight
             + new_config.weights.dispute_history_weight;
-        
+
         if total_weight != 100 {
             panic!("Weights must sum to 100");
         }
-        
+
         env.storage().instance().set(&DataKey::Config, &new_config);
     }
 
@@ -566,7 +651,7 @@ impl ReputationSystemContract {
         env.storage()
             .instance()
             .get(&DataKey::Config)
-            .unwrap_or_else(|| Config::default())
+            .unwrap_or_default()
     }
 
     // -----------------------------------------------------------------------
@@ -583,66 +668,69 @@ impl ReputationSystemContract {
         disputes_won: u32,
         disputes_lost: u32,
     ) {
-        let mut reputation_data: ReputationData = env.storage()
+        let mut reputation_data: ReputationData = env
+            .storage()
             .persistent()
             .get(&DataKey::Reputation(entity_address.clone()))
             .unwrap();
-        
+
         let config: Config = env.storage().instance().get(&DataKey::Config).unwrap();
-        
+
         // Calculate new factor scores
         let accuracy_score = accuracy.min(REPUTATION_SCALE);
         let uptime_score = uptime.min(REPUTATION_SCALE);
         let response_time_score = response_time.min(REPUTATION_SCALE);
-        
+
         // Calculate dispute history score
         let total_disputes = disputes_won + disputes_lost;
         let dispute_history_score = if total_disputes == 0 {
             7500 // Neutral score if no disputes
         } else {
-            (disputes_won as u32) * REPUTATION_SCALE / total_disputes
+            disputes_won * REPUTATION_SCALE / total_disputes
         };
-        
+
         // Update factor scores with exponential moving average
         let alpha = 20; // Smoothing factor
         reputation_data.factors.accuracy_score = Self::ema_update(
-            reputation_data.factors.accuracy_score, 
-            accuracy_score, 
-            alpha
+            reputation_data.factors.accuracy_score,
+            accuracy_score,
+            alpha,
         );
-        reputation_data.factors.uptime_score = Self::ema_update(
-            reputation_data.factors.uptime_score, 
-            uptime_score, 
-            alpha
-        );
+        reputation_data.factors.uptime_score =
+            Self::ema_update(reputation_data.factors.uptime_score, uptime_score, alpha);
         reputation_data.factors.response_time_score = Self::ema_update(
-            reputation_data.factors.response_time_score, 
-            response_time_score, 
-            alpha
+            reputation_data.factors.response_time_score,
+            response_time_score,
+            alpha,
         );
         reputation_data.factors.dispute_history_score = Self::ema_update(
-            reputation_data.factors.dispute_history_score, 
-            dispute_history_score, 
-            alpha
+            reputation_data.factors.dispute_history_score,
+            dispute_history_score,
+            alpha,
         );
-        
+
         // Calculate weighted overall score
         let weights = &config.weights;
-        let overall_score = (
-            (reputation_data.factors.accuracy_score as u64 * weights.accuracy_weight as u64) +
-            (reputation_data.factors.uptime_score as u64 * weights.uptime_weight as u64) +
-            (reputation_data.factors.response_time_score as u64 * weights.response_time_weight as u64) +
-            (reputation_data.factors.dispute_history_score as u64 * weights.dispute_history_weight as u64)
-        ) / 100;
-        
+        let overall_score = ((reputation_data.factors.accuracy_score as u64
+            * weights.accuracy_weight as u64)
+            + (reputation_data.factors.uptime_score as u64 * weights.uptime_weight as u64)
+            + (reputation_data.factors.response_time_score as u64
+                * weights.response_time_weight as u64)
+            + (reputation_data.factors.dispute_history_score as u64
+                * weights.dispute_history_weight as u64))
+            / 100;
+
         reputation_data.overall_score = overall_score as u32;
-        
-        env.storage().persistent().set(&DataKey::Reputation(entity_address), &reputation_data);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reputation(entity_address), &reputation_data);
     }
 
     /// Calculate exponential moving average
     fn ema_update(current: u32, new: u32, alpha: u32) -> u32 {
-        let result: u64 = ((current as u64 * (100 - alpha) as u64) + (new as u64 * alpha as u64)) / 100;
+        let result: u64 =
+            ((current as u64 * (100 - alpha) as u64) + (new as u64 * alpha as u64)) / 100;
         result as u32
     }
 
@@ -651,11 +739,11 @@ impl ReputationSystemContract {
         if time_since_update == 0 {
             return REPUTATION_SCALE;
         }
-        
+
         // Use exponential decay: factor = 0.5^(time / half-life)
         let half_lives = (time_since_update as f64) / (TIME_DECAY_HALFLIFE as f64);
         let decay_factor = 0.5f64.powf(half_lives);
-        
+
         (decay_factor * (REPUTATION_SCALE as f64)) as u32
     }
 
@@ -673,19 +761,26 @@ impl ReputationSystemContract {
     }
 
     /// Update leaderboard with new entry
-    fn update_leaderboard_internal(env: &Env, entity_address: Address, score: u32, badge_level: BadgeLevel) {
-        let reputation_data: ReputationData = env.storage()
+    fn update_leaderboard_internal(
+        env: &Env,
+        entity_address: Address,
+        score: u32,
+        badge_level: BadgeLevel,
+    ) {
+        let reputation_data: ReputationData = env
+            .storage()
             .persistent()
             .get(&DataKey::Reputation(entity_address.clone()))
             .unwrap();
-        
+
         let entity_type = reputation_data.entity_type.clone();
-        
-        let mut leaderboard: Vec<LeaderboardEntry> = env.storage()
+
+        let mut leaderboard: Vec<LeaderboardEntry> = env
+            .storage()
             .instance()
             .get(&DataKey::ReputationLeaderboard(entity_type.clone()))
             .unwrap_or_else(|| Vec::new(env));
-        
+
         // Check if entity already exists in leaderboard
         let mut found = false;
         for i in 0..leaderboard.len() {
@@ -702,7 +797,7 @@ impl ReputationSystemContract {
                 break;
             }
         }
-        
+
         if !found {
             // Add new entry
             let entry = LeaderboardEntry {
@@ -713,8 +808,10 @@ impl ReputationSystemContract {
             };
             leaderboard.push_back(entry);
         }
-        
-        env.storage().instance().set(&DataKey::ReputationLeaderboard(entity_type), &leaderboard);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ReputationLeaderboard(entity_type), &leaderboard);
     }
 }
 
@@ -722,7 +819,6 @@ impl ReputationSystemContract {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::testutils::Ledger;
     use soroban_sdk::Env;
 
     /// Helper: set up a fresh contract with an admin
@@ -740,7 +836,7 @@ mod tests {
     #[test]
     fn test_initialize() {
         let (_env, client, _admin) = setup();
-        
+
         let config = client.get_config();
         assert_eq!(config.weights.accuracy_weight, 30);
         assert_eq!(config.weights.uptime_weight, 25);
@@ -752,9 +848,9 @@ mod tests {
     fn test_register_entity() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         client.register_entity(&entity, &EntityType::BridgeOperator, &(10000));
-        
+
         let reputation = client.get_reputation(&entity);
         assert!(reputation.is_some());
         let rep = reputation.unwrap();
@@ -768,10 +864,10 @@ mod tests {
     fn test_record_performance() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         client.register_entity(&entity, &EntityType::OracleNode, &(5000));
         client.record_performance(&entity, &9500, &9800, &9200, &3, &1, &100, &95);
-        
+
         let reputation = client.get_reputation(&entity);
         assert!(reputation.is_some());
         let rep = reputation.unwrap();
@@ -784,14 +880,14 @@ mod tests {
     fn test_apply_penalty() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         // Register entity
         client.register_entity(&entity, &EntityType::RelayOperator, &(10000));
-        
+
         // Test that poor performance affects reputation
         let initial_score = client.get_reputation(&entity).unwrap().overall_score;
         client.record_performance(&entity, &5000, &6000, &5000, &1, &5, &100, &50);
-        
+
         let reputation = client.get_reputation(&entity);
         assert!(reputation.is_some());
         let rep = reputation.unwrap();
@@ -805,14 +901,14 @@ mod tests {
     fn test_grant_reward() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         // Register entity
         client.register_entity(&entity, &EntityType::BridgeOperator, &(5000));
-        
+
         // Test that good performance improves reputation
         let initial_score = client.get_reputation(&entity).unwrap().overall_score;
         client.record_performance(&entity, &9500, &9800, &9500, &5, &0, &100, &100);
-        
+
         let reputation = client.get_reputation(&entity);
         assert!(reputation.is_some());
         let rep = reputation.unwrap();
@@ -825,18 +921,18 @@ mod tests {
     fn test_recovery_mechanism() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         // Register entity
         client.register_entity(&entity, &EntityType::OracleNode, &(10000));
-        
+
         // Test that performance can improve reputation
         client.record_performance(&entity, &9000, &9500, &9000, &5, &0, &50, &50);
         let initial_rep = client.get_reputation(&entity).unwrap();
-        
+
         // Continue improving performance
         client.record_performance(&entity, &9500, &9800, &9500, &10, &0, &100, &100);
         let improved_rep = client.get_reputation(&entity).unwrap();
-        
+
         // Reputation should have improved
         assert!(improved_rep.overall_score >= initial_rep.overall_score);
     }
@@ -847,19 +943,19 @@ mod tests {
         let entity1 = Address::generate(&env);
         let entity2 = Address::generate(&env);
         let entity3 = Address::generate(&env);
-        
+
         client.register_entity(&entity1, &EntityType::BridgeOperator, &(10000));
         client.register_entity(&entity2, &EntityType::BridgeOperator, &(10000));
         client.register_entity(&entity3, &EntityType::BridgeOperator, &(10000));
-        
+
         // Record different performance levels
         client.record_performance(&entity1, &9500, &9800, &9200, &5, &0, &100, &100);
         client.record_performance(&entity2, &8000, &8500, &8000, &3, &2, &100, &90);
         client.record_performance(&entity3, &6000, &7000, &6500, &2, &3, &100, &80);
-        
+
         let leaderboard = client.get_leaderboard(&EntityType::BridgeOperator, &10);
         assert_eq!(leaderboard.len(), 3);
-        
+
         // Verify ordering (highest score first)
         for i in 0..leaderboard.len() - 1 {
             assert!(leaderboard.get(i).unwrap().score >= leaderboard.get(i + 1).unwrap().score);
@@ -870,34 +966,40 @@ mod tests {
     fn test_badge_levels() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         // Test initial badge (should be None)
         client.register_entity(&entity, &EntityType::BridgeOperator, &(1000));
-        assert_eq!(client.get_reputation(&entity).unwrap().badge_level, BadgeLevel::None);
-        
+        assert_eq!(
+            client.get_reputation(&entity).unwrap().badge_level,
+            BadgeLevel::None
+        );
+
         // Test that after perfect performance, badge should be high
         client.record_performance(&entity, &10000, &10000, &10000, &10, &0, &100, &100);
         let reputation = client.get_reputation(&entity).unwrap();
-        
+
         // With perfect scores, should have at least Gold badge
-        assert!(matches!(reputation.badge_level, BadgeLevel::Gold | BadgeLevel::Platinum | BadgeLevel::Diamond));
+        assert!(matches!(
+            reputation.badge_level,
+            BadgeLevel::Gold | BadgeLevel::Platinum | BadgeLevel::Diamond
+        ));
     }
 
     #[test]
     fn test_access_control() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         // Test unregistered entity
         assert!(!client.check_access_control(&entity, &5000));
-        
+
         // Register with good reputation
         client.register_entity(&entity, &EntityType::BridgeOperator, &(10000));
         assert!(client.check_access_control(&entity, &5000));
-        
+
         // Poor performance should reduce reputation but not slash (slash requires penalty function)
         client.record_performance(&entity, &1000, &1000, &1000, &0, &10, &100, &10);
-        
+
         // With very poor performance, access control check should still work
         // but the threshold requirement might fail
         let rep = client.get_reputation(&entity).unwrap();
@@ -912,23 +1014,23 @@ mod tests {
     fn test_performance_history() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         client.register_entity(&entity, &EntityType::OracleNode, &(5000));
-        
+
         // Record multiple performance entries
         for i in 0..5 {
             client.record_performance(
-                &entity, 
-                &(9000 + i * 100), 
-                &(9500), 
-                &(9000), 
-                &(3), 
-                &(1), 
-                &(100), 
-                &(95)
+                &entity,
+                &(9000 + i * 100),
+                &(9500),
+                &(9000),
+                &(3),
+                &(1),
+                &(100),
+                &(95),
             );
         }
-        
+
         let history = client.get_performance_history(&entity);
         assert_eq!(history.len(), 5);
     }
@@ -936,7 +1038,7 @@ mod tests {
     #[test]
     fn test_config_update() {
         let (_env, client, _admin) = setup();
-        
+
         let new_config = Config {
             weights: ReputationWeights {
                 accuracy_weight: 40,
@@ -951,9 +1053,9 @@ mod tests {
             recovery_enabled: true,
             recovery_period: 60 * 24 * 60 * 60,
         };
-        
+
         client.update_config(&new_config);
-        
+
         let updated_config = client.get_config();
         assert_eq!(updated_config.weights.accuracy_weight, 40);
         assert_eq!(updated_config.min_stake_amount, 2000);
@@ -964,7 +1066,7 @@ mod tests {
     #[should_panic(expected = "Weights must sum to 100")]
     fn test_invalid_config_weights() {
         let (_env, client, _admin) = setup();
-        
+
         // Try to set invalid weights (don't sum to 100)
         let invalid_config = Config {
             weights: ReputationWeights {
@@ -975,7 +1077,7 @@ mod tests {
             },
             ..Config::default()
         };
-        
+
         client.update_config(&invalid_config);
     }
 
@@ -984,7 +1086,7 @@ mod tests {
     fn test_min_stake_validation() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         // Try to register with stake below minimum
         client.register_entity(&entity, &EntityType::BridgeOperator, &(100));
     }
@@ -994,7 +1096,7 @@ mod tests {
     fn test_duplicate_registration() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         client.register_entity(&entity, &EntityType::BridgeOperator, &(10000));
         // Try to register again
         client.register_entity(&entity, &EntityType::OracleNode, &(5000));
@@ -1004,7 +1106,7 @@ mod tests {
     fn test_weighted_reputation_calculation() {
         let (env, client, _admin) = setup();
         let entity = Address::generate(&env);
-        
+
         // Set custom weights
         let custom_config = Config {
             weights: ReputationWeights {
@@ -1016,33 +1118,35 @@ mod tests {
             ..Config::default()
         };
         client.update_config(&custom_config);
-        
+
         client.register_entity(&entity, &EntityType::BridgeOperator, &(10000));
-        
+
         let initial_rep = client.get_reputation(&entity).unwrap();
-        
+
         // Record performance with known values
         client.record_performance(
-            &entity, 
-            &(10000),  // accuracy: 100%
-            &(10000),  // uptime: 100%
-            &(10000),  // response_time: 100%
-            &(10),     // disputes_won
-            &(0),      // disputes_lost
-            &(100), 
-            &(100)
+            &entity,
+            &(10000), // accuracy: 100%
+            &(10000), // uptime: 100%
+            &(10000), // response_time: 100%
+            &(10),    // disputes_won
+            &(0),     // disputes_lost
+            &(100),
+            &(100),
         );
-        
+
         let reputation = client.get_reputation(&entity).unwrap();
-        
+
         // With perfect scores, reputation should improve from initial
         assert!(reputation.overall_score > initial_rep.overall_score);
-        
+
         // Verify factor scores are at least equal to initial (should improve with perfect scores)
         assert!(reputation.factors.accuracy_score >= initial_rep.factors.accuracy_score);
         assert!(reputation.factors.uptime_score >= initial_rep.factors.uptime_score);
         assert!(reputation.factors.response_time_score >= initial_rep.factors.response_time_score);
-        assert!(reputation.factors.dispute_history_score >= initial_rep.factors.dispute_history_score);
+        assert!(
+            reputation.factors.dispute_history_score >= initial_rep.factors.dispute_history_score
+        );
     }
 
     #[test]
@@ -1051,23 +1155,32 @@ mod tests {
         let bridge_entity = Address::generate(&env);
         let oracle_entity = Address::generate(&env);
         let relay_entity = Address::generate(&env);
-        
+
         client.register_entity(&bridge_entity, &EntityType::BridgeOperator, &(10000));
         client.register_entity(&oracle_entity, &EntityType::OracleNode, &(10000));
         client.register_entity(&relay_entity, &EntityType::RelayOperator, &(10000));
-        
+
         // Verify leaderboards are separate
         let bridge_leaderboard = client.get_leaderboard(&EntityType::BridgeOperator, &10);
         let oracle_leaderboard = client.get_leaderboard(&EntityType::OracleNode, &10);
         let relay_leaderboard = client.get_leaderboard(&EntityType::RelayOperator, &10);
-        
+
         assert_eq!(bridge_leaderboard.len(), 1);
         assert_eq!(oracle_leaderboard.len(), 1);
         assert_eq!(relay_leaderboard.len(), 1);
-        
+
         // Verify entities are in correct leaderboards
-        assert_eq!(bridge_leaderboard.get(0).unwrap().entity_address, bridge_entity);
-        assert_eq!(oracle_leaderboard.get(0).unwrap().entity_address, oracle_entity);
-        assert_eq!(relay_leaderboard.get(0).unwrap().entity_address, relay_entity);
+        assert_eq!(
+            bridge_leaderboard.get(0).unwrap().entity_address,
+            bridge_entity
+        );
+        assert_eq!(
+            oracle_leaderboard.get(0).unwrap().entity_address,
+            oracle_entity
+        );
+        assert_eq!(
+            relay_leaderboard.get(0).unwrap().entity_address,
+            relay_entity
+        );
     }
 }

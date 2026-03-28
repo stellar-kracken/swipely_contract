@@ -1,21 +1,22 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 // governance and insurance_pool are standalone contracts — only compiled for
 // tests (native target) to avoid Wasm symbol conflicts with BridgeWatchContract.
-#[cfg(test)]
-pub mod governance;
-pub mod liquidity_pool;
-pub mod reputation_system;
-pub mod multisig_treasury;
-#[cfg(test)]
-pub mod insurance_pool;
-#[cfg(test)]
-pub mod rate_limiter;
-#[cfg(test)]
-pub mod asset_registry;
 pub mod analytics_aggregator;
 #[cfg(test)]
+pub mod asset_registry;
+#[cfg(test)]
 pub mod circuit_breaker;
+#[cfg(test)]
+pub mod governance;
+#[cfg(test)]
+pub mod insurance_pool;
+pub mod liquidity_pool;
+pub mod multisig_treasury;
+#[cfg(test)]
+pub mod rate_limiter;
+pub mod reputation_system;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
 
@@ -192,6 +193,62 @@ pub struct RoleAssignment {
     pub role: AdminRole,
 }
 
+// ---------------------------------------------------------------------------
+// Emergency Pause types (issue #96)
+// ---------------------------------------------------------------------------
+
+/// A single entry in the contract's pause/unpause audit log.
+///
+/// Emitted and stored whenever the global pause state changes so that
+/// operators can trace the full history of emergency actions.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PauseRecord {
+    /// `true` if this entry records a pause; `false` for an unpause.
+    pub paused: bool,
+    /// Human-readable reason provided by the caller.
+    pub reason: String,
+    /// Address that triggered the pause or unpause.
+    pub caller: Address,
+    /// Ledger timestamp when the action was performed.
+    pub timestamp: u64,
+}
+
+/// Complete current global pause state returned by `get_pause_status()`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlobalPauseState {
+    /// Whether the contract is currently globally paused.
+    pub is_paused: bool,
+    /// Reason the contract was paused; empty string when not paused.
+    pub reason: String,
+    /// Ledger timestamp when the contract was most recently paused (0 if never).
+    pub paused_at: u64,
+    /// Earliest ledger timestamp at which `unpause()` may be called (0 if not paused).
+    pub unpause_available_at: u64,
+    /// Emergency contact information (e.g. Telegram handle, Discord, e-mail).
+    pub emergency_contact: String,
+}
+
+// ---------------------------------------------------------------------------
+// Admin Transfer types (issue #97)
+// ---------------------------------------------------------------------------
+
+/// A pending two-step admin transfer proposal.
+///
+/// Created by `propose_admin_transfer()` and consumed by either
+/// `accept_admin_transfer()` or `cancel_admin_transfer()`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAdminTransfer {
+    /// The address nominated to become the new admin.
+    pub proposed_admin: Address,
+    /// Ledger timestamp when the proposal was made.
+    pub proposed_at: u64,
+    /// Ledger timestamp after which the proposal expires automatically.
+    pub timeout_at: u64,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -220,11 +277,40 @@ pub enum DataKey {
     LiquidityPairs,
     /// Historical price records for an asset (Vec<PriceRecord>).
     PriceHistory(String),
+    /// Stored health score calculation weights.
+    HealthWeights,
+    /// Detailed health score calculation result for an asset.
+    HealthScoreResult(String),
+    // -----------------------------------------------------------------------
+    // Emergency Pause storage keys (issue #96)
+    // -----------------------------------------------------------------------
+    /// Global pause toggle — stores `bool`.
+    GlobalPaused,
+    /// Address authorised to call `emergency_pause()` without admin rights.
+    PauseGuardian,
+    /// Human-readable reason for the current global pause.
+    PauseReason,
+    /// Ledger timestamp at which the current global pause was triggered.
+    PausedAt,
+    /// Earliest ledger timestamp at which `unpause()` may succeed (timelock).
+    UnpauseAvailableAt,
+    /// Full ordered history of pause/unpause events (`Vec<PauseRecord>`).
+    PauseHistory,
+    /// Operator emergency contact string (e-mail, Telegram, etc.).
+    EmergencyContact,
+    /// Per-asset pause reason (separate from the global pause).
+    AssetPauseReason(String),
+    // -----------------------------------------------------------------------
+    // Admin Transfer storage keys (issue #97)
+    // -----------------------------------------------------------------------
+    /// Pending two-step admin transfer proposal (`PendingAdminTransfer`).
+    PendingTransfer,
 }
 
 #[contract]
 pub struct BridgeWatchContract;
 
+#[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl BridgeWatchContract {
     /// Initialize the contract with an admin address
@@ -251,6 +337,7 @@ impl BridgeWatchContract {
         price_stability_score: u32,
         bridge_uptime_score: u32,
     ) {
+        Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
         let status = Self::load_asset_health(&env, &asset_code);
         Self::assert_asset_accepting_submissions(&status);
@@ -280,6 +367,7 @@ impl BridgeWatchContract {
     /// `HealthSubmitter`. Accepts up to 20 records per call, all stamped with
     /// the same ledger timestamp. A `health_up` event is emitted per asset.
     pub fn submit_health_batch(env: Env, caller: Address, records: Vec<HealthScoreBatch>) {
+        Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
 
         if records.len() > 20 {
@@ -327,6 +415,7 @@ impl BridgeWatchContract {
         price: i128,
         source: String,
     ) {
+        Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::PriceSubmitter);
         let status = Self::load_asset_health(&env, &asset_code);
         Self::assert_asset_accepting_submissions(&status);
@@ -365,6 +454,7 @@ impl BridgeWatchContract {
     /// `caller` must be the contract admin, a `SuperAdmin`, or an
     /// `AssetManager`.
     pub fn register_asset(env: Env, caller: Address, asset_code: String) {
+        Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::AssetManager);
 
         let mut assets: Vec<String> = env
@@ -446,6 +536,7 @@ impl BridgeWatchContract {
     /// `caller` must be the contract admin, a `SuperAdmin`, or an
     /// `AssetManager`.
     pub fn deregister_asset(env: Env, caller: Address, asset_code: String) {
+        Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::AssetManager);
         let mut status = Self::load_asset_health(&env, &asset_code);
         status.active = false;
@@ -460,7 +551,8 @@ impl BridgeWatchContract {
 
     /// Get all monitored assets
     pub fn get_monitored_assets(env: Env) -> Vec<String> {
-        let assets: Vec<String> = env.storage()
+        let assets: Vec<String> = env
+            .storage()
             .instance()
             .get(&DataKey::MonitoredAssets)
             .unwrap();
@@ -501,8 +593,10 @@ impl BridgeWatchContract {
         medium_bps: i128,
         high_bps: i128,
     ) {
+        Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+        Self::check_no_pending_transfer(&env);
 
         let threshold = DeviationThreshold {
             low_bps,
@@ -531,14 +625,10 @@ impl BridgeWatchContract {
         asset_code: String,
         current_price: i128,
     ) -> Option<DeviationAlert> {
-        let reference: PriceRecord = match env
+        let reference: PriceRecord = env
             .storage()
             .persistent()
-            .get(&DataKey::PriceRecord(asset_code.clone()))
-        {
-            Some(r) => r,
-            None => return None,
-        };
+            .get(&DataKey::PriceRecord(asset_code.clone()))?;
 
         let average_price = reference.price;
         if average_price == 0 {
@@ -609,14 +699,18 @@ impl BridgeWatchContract {
     /// Mismatches at or above this value are flagged as critical.
     /// Default is 10 bps (0.1 %).
     pub fn set_mismatch_threshold(env: Env, threshold_bps: i128) {
+        Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+        Self::check_no_pending_transfer(&env);
         env.storage()
             .instance()
             .set(&DataKey::MismatchThreshold, &threshold_bps);
 
-        env.events()
-            .publish((symbol_short!("thresh_up"), symbol_short!("mismatch")), threshold_bps);
+        env.events().publish(
+            (symbol_short!("thresh_up"), symbol_short!("mismatch")),
+            threshold_bps,
+        );
     }
 
     /// Record a supply mismatch for a bridge asset (admin only).
@@ -633,6 +727,7 @@ impl BridgeWatchContract {
         stellar_supply: i128,
         source_chain_supply: i128,
     ) {
+        Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -753,6 +848,7 @@ impl BridgeWatchContract {
     /// - any liquidity value is negative
     /// - `sources` is empty
     /// - liquidity depth levels are inconsistent
+    #[allow(clippy::too_many_arguments)]
     pub fn record_liquidity_depth(
         env: Env,
         asset_pair: String,
@@ -763,6 +859,7 @@ impl BridgeWatchContract {
         depth_5_pct: i128,
         sources: Vec<String>,
     ) {
+        Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -831,10 +928,7 @@ impl BridgeWatchContract {
     /// Return the latest aggregated liquidity depth for an asset pair.
     ///
     /// Public read access.
-    pub fn get_aggregated_liquidity_depth(
-        env: Env,
-        asset_pair: String,
-    ) -> Option<LiquidityDepth> {
+    pub fn get_aggregated_liquidity_depth(env: Env, asset_pair: String) -> Option<LiquidityDepth> {
         env.storage()
             .persistent()
             .get(&DataKey::LiquidityDepthCurrent(asset_pair))
@@ -898,8 +992,10 @@ impl BridgeWatchContract {
     /// via `initialize()` is implicitly treated as SuperAdmin and does not
     /// require an explicit role entry.
     pub fn grant_role(env: Env, granter: Address, grantee: Address, role: AdminRole) {
+        Self::assert_not_globally_paused(&env);
         granter.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        Self::check_no_pending_transfer(&env);
         let authorized =
             granter == admin || Self::has_role_internal(&env, &granter, AdminRole::SuperAdmin);
         if !authorized {
@@ -941,8 +1037,10 @@ impl BridgeWatchContract {
 
     /// Revoke a specific role from `target` (SuperAdmin or original admin only).
     pub fn revoke_role(env: Env, revoker: Address, target: Address, role: AdminRole) {
+        Self::assert_not_globally_paused(&env);
         revoker.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        Self::check_no_pending_transfer(&env);
         let authorized =
             revoker == admin || Self::has_role_internal(&env, &revoker, AdminRole::SuperAdmin);
         if !authorized {
@@ -1001,6 +1099,361 @@ impl BridgeWatchContract {
     }
 
     // -----------------------------------------------------------------------
+    // Emergency Pause (issue #96)
+    // -----------------------------------------------------------------------
+
+    /// Immediately halt all state-changing operations.
+    ///
+    /// `caller` must be the contract admin or the designated pause guardian.
+    /// A human-readable `reason` is stored on-chain and included in the emitted
+    /// event. Every call appends an entry to the immutable pause history log.
+    ///
+    /// After `emergency_pause()` succeeds, all write operations will panic
+    /// until `unpause()` is called **and** the configured timelock has elapsed
+    /// (default 24 hours / 86 400 seconds).
+    ///
+    /// # Panics
+    /// - `caller` is neither the admin nor the pause guardian.
+    pub fn emergency_pause(env: Env, caller: Address, reason: String) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let guardian: Option<Address> = env.storage().instance().get(&DataKey::PauseGuardian);
+        let is_admin = caller == admin;
+        let is_guardian = guardian.as_ref().map(|g| *g == caller).unwrap_or(false);
+        if !is_admin && !is_guardian {
+            panic!("only admin or pause guardian can trigger emergency pause");
+        }
+
+        let now = env.ledger().timestamp();
+        // Timelock: 24 hours before unpause is permitted
+        let timelock_secs: u64 = 86_400;
+
+        env.storage().instance().set(&DataKey::GlobalPaused, &true);
+        env.storage().instance().set(&DataKey::PauseReason, &reason);
+        env.storage().instance().set(&DataKey::PausedAt, &now);
+        env.storage()
+            .instance()
+            .set(&DataKey::UnpauseAvailableAt, &(now + timelock_secs));
+
+        // Append to the immutable pause history log
+        let record = PauseRecord {
+            paused: true,
+            reason: reason.clone(),
+            caller: caller.clone(),
+            timestamp: now,
+        };
+        let mut history: Vec<PauseRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PauseHistory)
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PauseHistory, &history);
+
+        env.events()
+            .publish((symbol_short!("em_pause"), caller), reason);
+    }
+
+    /// Lift the global pause after the timelock has elapsed.
+    ///
+    /// Only the contract admin may call `unpause()`. The call panics if the
+    /// 24-hour timelock set at pause-time has not yet expired, preventing
+    /// hasty re-activation in a still-live incident.
+    ///
+    /// # Panics
+    /// - `caller` is not the contract admin.
+    /// - The timelock (`unpause_available_at`) has not yet passed.
+    pub fn unpause(env: Env, caller: Address, reason: String) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("only admin can unpause the contract");
+        }
+
+        let now = env.ledger().timestamp();
+        let available_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UnpauseAvailableAt)
+            .unwrap_or(0);
+        if now < available_at {
+            panic!("unpause timelock has not elapsed yet");
+        }
+
+        env.storage().instance().set(&DataKey::GlobalPaused, &false);
+
+        // Append unpause record to history
+        let record = PauseRecord {
+            paused: false,
+            reason: reason.clone(),
+            caller: caller.clone(),
+            timestamp: now,
+        };
+        let mut history: Vec<PauseRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PauseHistory)
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PauseHistory, &history);
+
+        env.events()
+            .publish((symbol_short!("em_unpaus"), caller), reason);
+    }
+
+    /// Designate a dedicated pause guardian address.
+    ///
+    /// The pause guardian can call `emergency_pause()` without holding an
+    /// admin role, but cannot call `unpause()`. Only the contract admin may
+    /// set or change the guardian.
+    ///
+    /// # Panics
+    /// - `caller` is not the contract admin.
+    pub fn set_pause_guardian(env: Env, caller: Address, guardian: Address) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("only admin can set pause guardian");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PauseGuardian, &guardian);
+
+        env.events().publish((symbol_short!("pg_set"),), guardian);
+    }
+
+    /// Return `true` when the contract is currently globally paused.
+    ///
+    /// Public read — no authorisation required.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::GlobalPaused)
+            .unwrap_or(false)
+    }
+
+    /// Return `true` when an asset is paused, either globally or per-asset.
+    ///
+    /// Public read — no authorisation required.
+    pub fn is_asset_paused(env: Env, asset_code: String) -> bool {
+        let globally_paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalPaused)
+            .unwrap_or(false);
+        if globally_paused {
+            return true;
+        }
+        let status: Option<AssetHealth> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AssetHealth(asset_code));
+        status.map(|s| s.paused).unwrap_or(false)
+    }
+
+    /// Return a full snapshot of the current global pause state.
+    ///
+    /// Public read — no authorisation required. Suitable for dashboards and
+    /// monitoring tooling.
+    pub fn get_pause_status(env: Env) -> GlobalPauseState {
+        let is_paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalPaused)
+            .unwrap_or(false);
+        let reason: String = env
+            .storage()
+            .instance()
+            .get(&DataKey::PauseReason)
+            .unwrap_or_else(|| String::from_str(&env, ""));
+        let paused_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PausedAt)
+            .unwrap_or(0);
+        let unpause_available_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UnpauseAvailableAt)
+            .unwrap_or(0);
+        let emergency_contact: String = env
+            .storage()
+            .instance()
+            .get(&DataKey::EmergencyContact)
+            .unwrap_or_else(|| String::from_str(&env, ""));
+
+        GlobalPauseState {
+            is_paused,
+            reason,
+            paused_at,
+            unpause_available_at,
+            emergency_contact,
+        }
+    }
+
+    /// Return the full ordered pause/unpause history log.
+    ///
+    /// Public read — no authorisation required.
+    pub fn get_pause_history(env: Env) -> Vec<PauseRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PauseHistory)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Store operator emergency contact information (e-mail, Telegram, etc.).
+    ///
+    /// Only the contract admin may update this value. The contact string is
+    /// included in the `get_pause_status()` response so monitoring tools can
+    /// surface it automatically when a pause is detected.
+    ///
+    /// # Panics
+    /// - `caller` is not the contract admin.
+    pub fn set_emergency_contact(env: Env, caller: Address, contact: String) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("only admin can set emergency contact");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyContact, &contact);
+
+        env.events().publish((symbol_short!("em_cont"),), contact);
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin Transfer (issue #97)
+    // -----------------------------------------------------------------------
+
+    /// Propose a transfer of the admin role to `proposed_admin`.
+    ///
+    /// The current admin initiates the two-step handover. The proposal expires
+    /// after 7 days (604 800 seconds); after that, the pending proposal is
+    /// automatically considered void and either party must restart the process.
+    ///
+    /// While a transfer is pending, the following admin-only write operations
+    /// are blocked: `grant_role`, `revoke_role`, `set_health_weights`,
+    /// `set_deviation_threshold`, `set_mismatch_threshold`.
+    ///
+    /// # Panics
+    /// - `caller` is not the current contract admin.
+    /// - A non-expired proposal already exists.
+    pub fn propose_admin_transfer(env: Env, caller: Address, proposed_admin: Address) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("only the current admin can propose a transfer");
+        }
+
+        // Reject if a non-expired proposal already exists
+        let existing: Option<PendingAdminTransfer> =
+            env.storage().instance().get(&DataKey::PendingTransfer);
+        if let Some(ref proposal) = existing {
+            let now = env.ledger().timestamp();
+            if now < proposal.timeout_at {
+                panic!("a pending transfer already exists; cancel it first");
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let timeout_secs: u64 = 604_800; // 7 days
+        let proposal = PendingAdminTransfer {
+            proposed_admin: proposed_admin.clone(),
+            proposed_at: now,
+            timeout_at: now + timeout_secs,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingTransfer, &proposal);
+
+        env.events()
+            .publish((symbol_short!("adm_prop"), caller), proposed_admin);
+    }
+
+    /// Accept an incoming admin transfer proposal.
+    ///
+    /// Must be called by the address that was nominated in
+    /// `propose_admin_transfer()`. On success the contract admin is atomically
+    /// updated to `caller` and the pending proposal is cleared.
+    ///
+    /// # Panics
+    /// - There is no pending proposal.
+    /// - The proposal has expired (older than 7 days).
+    /// - `caller` is not the nominated new admin.
+    pub fn accept_admin_transfer(env: Env, caller: Address) {
+        caller.require_auth();
+        let proposal: PendingAdminTransfer = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingTransfer)
+            .unwrap_or_else(|| panic!("no pending admin transfer"));
+
+        let now = env.ledger().timestamp();
+        if now >= proposal.timeout_at {
+            panic!("admin transfer proposal has expired");
+        }
+        if caller != proposal.proposed_admin {
+            panic!("caller is not the nominated new admin");
+        }
+
+        // Atomically promote the caller to admin and clear the proposal
+        env.storage().instance().set(&DataKey::Admin, &caller);
+        env.storage().instance().remove(&DataKey::PendingTransfer);
+
+        env.events()
+            .publish((symbol_short!("adm_acpt"), caller), true);
+    }
+
+    /// Cancel a pending admin transfer proposal.
+    ///
+    /// Only the current admin (the proposer) may cancel. This is the emergency
+    /// override path if the nominated address is compromised or the proposal
+    /// was sent in error.
+    ///
+    /// # Panics
+    /// - `caller` is not the current contract admin.
+    /// - There is no pending proposal to cancel.
+    pub fn cancel_admin_transfer(env: Env, caller: Address) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("only the current admin can cancel a transfer");
+        }
+        if !env.storage().instance().has(&DataKey::PendingTransfer) {
+            panic!("no pending admin transfer to cancel");
+        }
+        env.storage().instance().remove(&DataKey::PendingTransfer);
+
+        env.events()
+            .publish((symbol_short!("adm_cncl"), caller), true);
+    }
+
+    /// Return the current pending admin transfer proposal, if any.
+    ///
+    /// Returns `None` when there is no proposal or the proposal has expired.
+    /// Public read — no authorisation required.
+    pub fn get_pending_transfer(env: Env) -> Option<PendingAdminTransfer> {
+        let proposal: Option<PendingAdminTransfer> =
+            env.storage().instance().get(&DataKey::PendingTransfer);
+        match proposal {
+            None => None,
+            Some(p) => {
+                let now = env.ledger().timestamp();
+                if now >= p.timeout_at {
+                    None // expired
+                } else {
+                    Some(p)
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
@@ -1020,6 +1473,36 @@ impl BridgeWatchContract {
         }
     }
 
+    /// Panic if the contract is currently globally paused.
+    ///
+    /// Called at the top of every state-changing function to enforce the
+    /// emergency pause invariant. Read-only query functions must NOT call this.
+    fn assert_not_globally_paused(env: &Env) {
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalPaused)
+            .unwrap_or(false);
+        if paused {
+            panic!("contract is globally paused; all write operations are halted");
+        }
+    }
+
+    /// Panic if a non-expired admin transfer proposal is in flight.
+    ///
+    /// Called inside sensitive admin write operations to prevent concurrent
+    /// privileged changes while admin rights are being handed over.
+    fn check_no_pending_transfer(env: &Env) {
+        let proposal: Option<PendingAdminTransfer> =
+            env.storage().instance().get(&DataKey::PendingTransfer);
+        if let Some(p) = proposal {
+            let now = env.ledger().timestamp();
+            if now < p.timeout_at {
+                panic!("admin functions are locked during a pending admin transfer");
+            }
+        }
+    }
+
     /// Internal role lookup (no auth check).
     fn has_role_internal(env: &Env, address: &Address, role: AdminRole) -> bool {
         let roles: Vec<AdminRole> = env
@@ -1035,6 +1518,7 @@ impl BridgeWatchContract {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn validate_liquidity_depth_input(
         env: &Env,
         asset_pair: &String,
@@ -1056,7 +1540,7 @@ impl BridgeWatchContract {
         {
             panic!("liquidity values must be non-negative");
         }
-        if sources.len() == 0 {
+        if sources.is_empty() {
             panic!("at least one liquidity source is required");
         }
         if depth_0_1_pct > depth_0_5_pct || depth_0_5_pct > depth_1_pct || depth_1_pct > depth_5_pct
@@ -1099,6 +1583,7 @@ impl BridgeWatchContract {
     /// Writes the snapshot into a gas-optimised ring buffer, updates the
     /// corresponding daily aggregation bucket, and emits events when
     /// significant liquidity changes are detected.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_pool_state(
         env: Env,
         pool_id: String,
@@ -1109,6 +1594,7 @@ impl BridgeWatchContract {
         fees: i128,
         pool_type: PoolType,
     ) {
+        Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -1207,15 +1693,21 @@ impl BridgeWatchContract {
         bridge_uptime_weight: u32,
         version: u32,
     ) {
+        Self::assert_not_globally_paused(&env);
         caller.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        Self::check_no_pending_transfer(&env);
         let authorized =
             caller == admin || Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
         if !authorized {
             panic!("only admin or SuperAdmin can set health weights");
         }
 
-        Self::validate_weights(liquidity_weight, price_stability_weight, bridge_uptime_weight);
+        Self::validate_weights(
+            liquidity_weight,
+            price_stability_weight,
+            bridge_uptime_weight,
+        );
         if version == 0 {
             panic!("methodology version must be greater than 0");
         }
@@ -1231,8 +1723,7 @@ impl BridgeWatchContract {
             .instance()
             .set(&DataKey::HealthWeights, &weights);
 
-        env.events()
-            .publish((symbol_short!("wt_set"),), version);
+        env.events().publish((symbol_short!("wt_set"),), version);
     }
 
     /// Return the current health score calculation weights.
@@ -1316,6 +1807,7 @@ impl BridgeWatchContract {
         bridge_uptime_score: u32,
         manual_override: Option<u32>,
     ) {
+        Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
         let status = Self::load_asset_health(&env, &asset_code);
         Self::assert_asset_accepting_submissions(&status);
@@ -1369,10 +1861,8 @@ impl BridgeWatchContract {
             .persistent()
             .set(&DataKey::HealthScoreResult(asset_code.clone()), &result);
 
-        env.events().publish(
-            (symbol_short!("health_up"), asset_code),
-            final_score,
-        );
+        env.events()
+            .publish((symbol_short!("health_up"), asset_code), final_score);
     }
 
     /// Return the latest calculated health score result for an asset.
@@ -1700,7 +2190,7 @@ mod tests {
         let mut found = false;
         for i in 0..events.len() {
             let (addr, topics, _data) = events.get(i).unwrap();
-            if addr == *contract && topics.len() > 0 {
+            if addr == *contract && !topics.is_empty() {
                 // The first topic is the event symbol stored as a Val;
                 // convert via IntoVal for comparison.
                 let topic_val: soroban_sdk::Val = topics.get(0).unwrap();

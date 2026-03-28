@@ -431,11 +431,7 @@ impl AssetRegistryContract {
             .set(&DataKey::AssetList, &asset_list);
 
         // Update category index
-        Self::add_to_index(
-            &env,
-            &DataKey::CategoryIndex(category),
-            &asset_code,
-        );
+        Self::add_to_index(&env, &DataKey::CategoryIndex(category), &asset_code);
 
         // Update status index
         Self::add_to_index(
@@ -516,11 +512,7 @@ impl AssetRegistryContract {
         metadata.updated_at = env.ledger().timestamp();
 
         // Add to new category index
-        Self::add_to_index(
-            &env,
-            &DataKey::CategoryIndex(new_category),
-            &asset_code,
-        );
+        Self::add_to_index(&env, &DataKey::CategoryIndex(new_category), &asset_code);
 
         let reason = String::from_str(&env, "Category updated");
         Self::save_with_version(
@@ -593,14 +585,14 @@ impl AssetRegistryContract {
         let mut metadata = Self::get_asset_or_err(&env, &asset_code)?;
 
         // Validate lifecycle transition
-        let valid = match (&metadata.status, &new_status) {
-            (AssetStatus::PendingReview, AssetStatus::Active) => true,
-            (AssetStatus::Active, AssetStatus::Paused) => true,
-            (AssetStatus::Paused, AssetStatus::Active) => true,
-            (AssetStatus::Active, AssetStatus::Deprecated) => true,
-            (AssetStatus::Paused, AssetStatus::Deprecated) => true,
-            _ => false,
-        };
+        let valid = matches!(
+            (&metadata.status, &new_status),
+            (AssetStatus::PendingReview, AssetStatus::Active)
+                | (AssetStatus::Active, AssetStatus::Paused)
+                | (AssetStatus::Paused, AssetStatus::Active)
+                | (AssetStatus::Active, AssetStatus::Deprecated)
+                | (AssetStatus::Paused, AssetStatus::Deprecated)
+        );
         if !valid {
             return Err(RegistryError::InvalidLifecycleTransition);
         }
@@ -611,11 +603,7 @@ impl AssetRegistryContract {
             &DataKey::StatusIndex(metadata.status.clone()),
             &asset_code,
         );
-        Self::add_to_index(
-            &env,
-            &DataKey::StatusIndex(new_status.clone()),
-            &asset_code,
-        );
+        Self::add_to_index(&env, &DataKey::StatusIndex(new_status.clone()), &asset_code);
 
         metadata.status = new_status;
         metadata.version += 1;
@@ -980,12 +968,7 @@ impl AssetRegistryContract {
             .get(&DataKey::Versions(asset_code))
             .unwrap_or_else(|| Vec::new(&env));
 
-        for v in versions.iter() {
-            if v.version == version {
-                return Some(v);
-            }
-        }
-        None
+        versions.iter().find(|v| v.version == version)
     }
 
     // =======================================================================
@@ -1127,11 +1110,7 @@ mod tests {
     }
 
     /// Helper: register a standard USDC asset and return its code.
-    fn register_usdc(
-        env: &Env,
-        client: &AssetRegistryContractClient,
-        admin: &Address,
-    ) -> String {
+    fn register_usdc(env: &Env, client: &AssetRegistryContractClient, admin: &Address) -> String {
         let asset_code = String::from_str(env, "USDC");
         let name = String::from_str(env, "USD Coin");
         let symbol = String::from_str(env, "USDC");
@@ -1524,7 +1503,10 @@ mod tests {
 
         let records = client.get_compliance_records(&asset_code);
         assert_eq!(records.len(), 1);
-        assert_eq!(records.get(0).unwrap().jurisdiction, String::from_str(&env, "US"));
+        assert_eq!(
+            records.get(0).unwrap().jurisdiction,
+            String::from_str(&env, "US")
+        );
     }
 
     #[test]
@@ -1580,7 +1562,10 @@ mod tests {
 
         let chains = client.get_chain_links(&asset_code);
         assert_eq!(chains.len(), 1);
-        assert_eq!(chains.get(0).unwrap().chain_id, String::from_str(&env, "ethereum"));
+        assert_eq!(
+            chains.get(0).unwrap().chain_id,
+            String::from_str(&env, "ethereum")
+        );
         assert!(chains.get(0).unwrap().is_canonical);
     }
 
@@ -1772,7 +1757,10 @@ mod tests {
 
         let pools = client.get_pool_associations(&asset_code);
         assert_eq!(pools.len(), 1);
-        assert_eq!(pools.get(0).unwrap().pool_id, String::from_str(&env, "USDC_XLM"));
+        assert_eq!(
+            pools.get(0).unwrap().pool_id,
+            String::from_str(&env, "USDC_XLM")
+        );
     }
 
     #[test]
@@ -1806,7 +1794,7 @@ mod tests {
         let asset_code = register_usdc(&env, &client, &admin);
 
         // Make 3 updates
-        for i in 0..3u32 {
+        for _i in 0..3u32 {
             let name = String::from_str(&env, "USD Coin");
             client.update_metadata(
                 &admin,
@@ -2031,11 +2019,15 @@ mod tests {
 
         assert_eq!(client.get_all_assets().len(), 6);
         assert_eq!(
-            client.get_assets_by_category(&AssetCategory::Stablecoin).len(),
+            client
+                .get_assets_by_category(&AssetCategory::Stablecoin)
+                .len(),
             1
         );
         assert_eq!(
-            client.get_assets_by_category(&AssetCategory::RealWorldAsset).len(),
+            client
+                .get_assets_by_category(&AssetCategory::RealWorldAsset)
+                .len(),
             1
         );
         assert_eq!(

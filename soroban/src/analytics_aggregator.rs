@@ -1,4 +1,6 @@
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec, Map};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, Env, Map, String, Vec,
+};
 
 const BUFFER_SIZE: u64 = 168; // 1 week of hourly buckets
 
@@ -50,11 +52,18 @@ pub struct AnalyticsAggregatorContract;
 impl AnalyticsAggregatorContract {
     pub fn initialize(env: Env, admin: Address) {
         admin.require_auth();
-        assert!(!env.storage().instance().has(&DataKey::Admin), "already initialized");
+        assert!(
+            !env.storage().instance().has(&DataKey::Admin),
+            "already initialized"
+        );
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::RegisteredMetrics, &Vec::<String>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::RegisteredMetrics, &Vec::<String>::new(&env));
         let custom: Map<String, String> = Map::new(&env);
-        env.storage().instance().set(&DataKey::CustomMetrics, &custom);
+        env.storage()
+            .instance()
+            .set(&DataKey::CustomMetrics, &custom);
     }
 
     fn get_admin(env: &Env) -> Address {
@@ -84,23 +93,21 @@ impl AnalyticsAggregatorContract {
         (bucket_start / Self::bucket_length(bucket)) % BUFFER_SIZE
     }
 
-    fn store_bucket_value(env: &Env, metric: &String, bucket: &BucketType, bucket_start: u64, value: i128) {
+    fn store_bucket_value(
+        env: &Env,
+        metric: &String,
+        bucket: &BucketType,
+        bucket_start: u64,
+        value: i128,
+    ) {
         let slot = Self::slot_index(bucket_start, bucket);
         let ts_key = DataKey::MetricBucketTimestamp(metric.clone(), bucket.clone(), slot);
         let value_key = DataKey::MetricBucket(metric.clone(), bucket.clone(), slot);
 
-        let existing_ts: u64 = env
-            .storage()
-            .instance()
-            .get(&ts_key)
-            .unwrap_or(0_u64);
+        let existing_ts: u64 = env.storage().instance().get(&ts_key).unwrap_or(0_u64);
 
         let next_value = if existing_ts == bucket_start {
-            let existing_value: i128 = env
-                .storage()
-                .instance()
-                .get(&value_key)
-                .unwrap_or(0_i128);
+            let existing_value: i128 = env.storage().instance().get(&value_key).unwrap_or(0_i128);
             existing_value + value
         } else {
             value
@@ -110,16 +117,17 @@ impl AnalyticsAggregatorContract {
         env.storage().instance().set(&value_key, &next_value);
     }
 
-    fn load_bucket_value(env: &Env, metric: &String, bucket: &BucketType, bucket_start: u64) -> i128 {
+    fn load_bucket_value(
+        env: &Env,
+        metric: &String,
+        bucket: &BucketType,
+        bucket_start: u64,
+    ) -> i128 {
         let slot = Self::slot_index(bucket_start, bucket);
         let ts_key = DataKey::MetricBucketTimestamp(metric.clone(), bucket.clone(), slot);
         let value_key = DataKey::MetricBucket(metric.clone(), bucket.clone(), slot);
 
-        let stored_ts: u64 = env
-            .storage()
-            .instance()
-            .get(&ts_key)
-            .unwrap_or(0_u64);
+        let stored_ts: u64 = env.storage().instance().get(&ts_key).unwrap_or(0_u64);
 
         if stored_ts != bucket_start {
             0
@@ -145,7 +153,9 @@ impl AnalyticsAggregatorContract {
 
         if !already {
             metrics.push_back(metric.clone());
-            env.storage().instance().set(&DataKey::RegisteredMetrics, &metrics);
+            env.storage()
+                .instance()
+                .set(&DataKey::RegisteredMetrics, &metrics);
         }
     }
 
@@ -155,11 +165,17 @@ impl AnalyticsAggregatorContract {
 
         Self::register_metric_if_missing(&env, &metric);
 
-        for bucket in [BucketType::Hourly, BucketType::Daily, BucketType::Weekly, BucketType::Monthly].iter() {
+        for bucket in [
+            BucketType::Hourly,
+            BucketType::Daily,
+            BucketType::Weekly,
+            BucketType::Monthly,
+        ]
+        .iter()
+        {
             let bucket_start = Self::round_bucket_start(timestamp, bucket);
-            let existing = Self::load_bucket_value(&env, &metric, bucket, bucket_start);
-            let next = existing + value;
-            Self::store_bucket_value(&env, &metric, bucket, bucket_start, next);
+            // store_bucket_value handles accumulation internally; just pass the raw value
+            Self::store_bucket_value(&env, &metric, bucket, bucket_start, value);
         }
 
         env.events().publish(
@@ -168,7 +184,12 @@ impl AnalyticsAggregatorContract {
         );
     }
 
-    pub fn get_metric_history(env: Env, metric: String, bucket: BucketType, limit: u32) -> Vec<MetricDataPoint> {
+    pub fn get_metric_history(
+        env: Env,
+        metric: String,
+        bucket: BucketType,
+        limit: u32,
+    ) -> Vec<MetricDataPoint> {
         assert!(limit > 0 && limit <= 168, "limit must be 1..168");
 
         let now = env.ledger().timestamp();
@@ -178,7 +199,10 @@ impl AnalyticsAggregatorContract {
         let mut current = current_start;
         for _ in 0..limit {
             let value = Self::load_bucket_value(&env, &metric, &bucket, current);
-            let point = MetricDataPoint { bucket_start: current, value };
+            let point = MetricDataPoint {
+                bucket_start: current,
+                value,
+            };
             history.push_back(point);
             current = current.saturating_sub(Self::bucket_length(&bucket));
         }
@@ -195,9 +219,12 @@ impl AnalyticsAggregatorContract {
             .unwrap_or(Map::new(&env));
 
         custom.set(name.clone(), formula.clone());
-        env.storage().instance().set(&DataKey::CustomMetrics, &custom);
+        env.storage()
+            .instance()
+            .set(&DataKey::CustomMetrics, &custom);
 
-        env.events().publish((symbol_short!("am_cst"),), (name, formula));
+        env.events()
+            .publish((symbol_short!("am_cst"),), (name, formula));
     }
 
     pub fn compute_custom_metric(env: Env, name: String) -> i128 {
@@ -212,16 +239,40 @@ impl AnalyticsAggregatorContract {
             .unwrap_or(String::from_str(&env, ""));
 
         if formula == String::from_str(&env, "tvl_per_tx") {
-            let tvl = Self::load_bucket_value(&env, &String::from_str(&env, "tvl"), &BucketType::Hourly, Self::round_bucket_start(env.ledger().timestamp(), &BucketType::Hourly));
-            let tx = Self::load_bucket_value(&env, &String::from_str(&env, "tx_count"), &BucketType::Hourly, Self::round_bucket_start(env.ledger().timestamp(), &BucketType::Hourly));
-            if tx == 0 { return 0; }
+            let tvl = Self::load_bucket_value(
+                &env,
+                &String::from_str(&env, "tvl"),
+                &BucketType::Hourly,
+                Self::round_bucket_start(env.ledger().timestamp(), &BucketType::Hourly),
+            );
+            let tx = Self::load_bucket_value(
+                &env,
+                &String::from_str(&env, "tx_count"),
+                &BucketType::Hourly,
+                Self::round_bucket_start(env.ledger().timestamp(), &BucketType::Hourly),
+            );
+            if tx == 0 {
+                return 0;
+            }
             return tvl / tx;
         }
 
         if formula == String::from_str(&env, "avg_user_volume") {
-            let volume = Self::load_bucket_value(&env, &String::from_str(&env, "volume"), &BucketType::Hourly, Self::round_bucket_start(env.ledger().timestamp(), &BucketType::Hourly));
-            let users = Self::load_bucket_value(&env, &String::from_str(&env, "user_count"), &BucketType::Hourly, Self::round_bucket_start(env.ledger().timestamp(), &BucketType::Hourly));
-            if users == 0 { return 0; }
+            let volume = Self::load_bucket_value(
+                &env,
+                &String::from_str(&env, "volume"),
+                &BucketType::Hourly,
+                Self::round_bucket_start(env.ledger().timestamp(), &BucketType::Hourly),
+            );
+            let users = Self::load_bucket_value(
+                &env,
+                &String::from_str(&env, "user_count"),
+                &BucketType::Hourly,
+                Self::round_bucket_start(env.ledger().timestamp(), &BucketType::Hourly),
+            );
+            if users == 0 {
+                return 0;
+            }
             return volume / users;
         }
 
@@ -234,10 +285,30 @@ impl AnalyticsAggregatorContract {
         let bucket_start = Self::round_bucket_start(now, &bucket);
 
         DashboardSummary {
-            tvl: Self::load_bucket_value(&env, &String::from_str(&env, "tvl"), &bucket, bucket_start),
-            volume: Self::load_bucket_value(&env, &String::from_str(&env, "volume"), &bucket, bucket_start),
-            user_count: Self::load_bucket_value(&env, &String::from_str(&env, "user_count"), &bucket, bucket_start),
-            tx_count: Self::load_bucket_value(&env, &String::from_str(&env, "tx_count"), &bucket, bucket_start),
+            tvl: Self::load_bucket_value(
+                &env,
+                &String::from_str(&env, "tvl"),
+                &bucket,
+                bucket_start,
+            ),
+            volume: Self::load_bucket_value(
+                &env,
+                &String::from_str(&env, "volume"),
+                &bucket,
+                bucket_start,
+            ),
+            user_count: Self::load_bucket_value(
+                &env,
+                &String::from_str(&env, "user_count"),
+                &bucket,
+                bucket_start,
+            ),
+            tx_count: Self::load_bucket_value(
+                &env,
+                &String::from_str(&env, "tx_count"),
+                &bucket,
+                bucket_start,
+            ),
         }
     }
 }
@@ -245,7 +316,10 @@ impl AnalyticsAggregatorContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Env,
+    };
 
     #[test]
     fn test_analytics_register_metric_and_history() {
@@ -253,17 +327,19 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, AnalyticsAggregatorContract);
         let client = AnalyticsAggregatorContractClient::new(&env, &contract_id);
-        let admin = Address::random(&env);
+        let admin = Address::generate(&env);
 
         client.initialize(&admin);
 
         let metric = String::from_str(&env, "tvl");
-        let now = 1_000_000u64;
+        // Use an exact hour boundary so both recordings fall in the same bucket
+        let now = 3600u64;
 
         client.record_metric(&admin, &metric, &1000_i128, &now);
         client.record_metric(&admin, &metric, &500_i128, &(now + 1800));
 
-        env.ledger().set_timestamp(now + 3600);
+        // Stay within the same hourly bucket (bucket starts at 3600, ends at 7199)
+        env.ledger().set_timestamp(now + 3599);
         let history = client.get_metric_history(&metric, &BucketType::Hourly, &3);
 
         assert_eq!(history.len(), 3);
@@ -276,7 +352,7 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, AnalyticsAggregatorContract);
         let client = AnalyticsAggregatorContractClient::new(&env, &contract_id);
-        let admin = Address::random(&env);
+        let admin = Address::generate(&env);
 
         client.initialize(&admin);
 
@@ -292,7 +368,11 @@ mod tests {
         client.record_metric(&admin, &tx, &50_i128, &now);
 
         env.ledger().set_timestamp(now);
-        client.set_custom_metric(&admin, &String::from_str(&env, "tvl_per_tx"), &String::from_str(&env, "tvl_per_tx"));
+        client.set_custom_metric(
+            &admin,
+            &String::from_str(&env, "tvl_per_tx"),
+            &String::from_str(&env, "tvl_per_tx"),
+        );
         let computed = client.compute_custom_metric(&String::from_str(&env, "tvl_per_tx"));
         assert_eq!(computed, 2000 / 50);
 

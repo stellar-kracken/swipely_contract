@@ -192,7 +192,9 @@ impl GovernanceContract {
                 .get(&DataKey::GuardianCount)
                 .unwrap_or(0);
             count += 1;
-            env.storage().instance().set(&DataKey::GuardianCount, &count);
+            env.storage()
+                .instance()
+                .set(&DataKey::GuardianCount, &count);
         }
     }
 
@@ -212,10 +214,10 @@ impl GovernanceContract {
                 .instance()
                 .get(&DataKey::GuardianCount)
                 .unwrap_or(0);
-            if count > 0 {
-                count -= 1;
-            }
-            env.storage().instance().set(&DataKey::GuardianCount, &count);
+            count = count.saturating_sub(1);
+            env.storage()
+                .instance()
+                .set(&DataKey::GuardianCount, &count);
         }
     }
 
@@ -274,10 +276,16 @@ impl GovernanceContract {
         let start_time = now + cfg.voting_delay;
         let end_time = start_time + cfg.voting_period;
 
-        let mut count: u32 = env.storage().instance().get(&DataKey::ProposalCount).unwrap();
+        let mut count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalCount)
+            .unwrap();
         let id = count;
         count += 1;
-        env.storage().instance().set(&DataKey::ProposalCount, &count);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalCount, &count);
 
         let proposal = Proposal {
             id,
@@ -309,10 +317,7 @@ impl GovernanceContract {
     /// Transition Pending -> Active once the voting delay has passed. Anyone can call.
     pub fn activate_proposal(env: Env, proposal_id: u32) {
         let mut proposal = Self::load_proposal(&env, proposal_id);
-        assert!(
-            proposal.status == ProposalStatus::Pending,
-            "not pending"
-        );
+        assert!(proposal.status == ProposalStatus::Pending, "not pending");
         assert!(
             env.ledger().timestamp() >= proposal.start_time,
             "voting delay not elapsed"
@@ -390,15 +395,13 @@ impl GovernanceContract {
             .get(&DataKey::TotalSupply)
             .unwrap_or(0);
 
-        let total_votes =
-            proposal.votes_for + proposal.votes_against + proposal.votes_abstain;
+        let total_votes = proposal.votes_for + proposal.votes_against + proposal.votes_abstain;
 
-        let quorum_met = total_supply > 0
-            && (total_votes * 10_000) / total_supply >= cfg.quorum_bps as i128;
+        let quorum_met =
+            total_supply > 0 && (total_votes * 10_000) / total_supply >= cfg.quorum_bps as i128;
 
         let threshold_met = (proposal.votes_for + proposal.votes_against) > 0
-            && (proposal.votes_for * 10_000)
-                / (proposal.votes_for + proposal.votes_against)
+            && (proposal.votes_for * 10_000) / (proposal.votes_for + proposal.votes_against)
                 >= cfg.pass_threshold_bps as i128;
 
         proposal.status = if quorum_met && threshold_met {
@@ -444,10 +447,8 @@ impl GovernanceContract {
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
-        env.events().publish(
-            (symbol_short!("gov"), symbol_short!("exec")),
-            proposal_id,
-        );
+        env.events()
+            .publish((symbol_short!("gov"), symbol_short!("exec")), proposal_id);
     }
 
     // ── Guardian multisig ─────────────────────────────────────────────────────
@@ -464,10 +465,7 @@ impl GovernanceContract {
         assert!(
             !env.storage()
                 .persistent()
-                .get::<DataKey, bool>(&DataKey::GuardianApproval(
-                    proposal_id,
-                    guardian.clone()
-                ))
+                .get::<DataKey, bool>(&DataKey::GuardianApproval(proposal_id, guardian.clone()))
                 .unwrap_or(false),
             "already approved"
         );
@@ -504,7 +502,10 @@ impl GovernanceContract {
             .persistent()
             .get(&DataKey::GuardianApprovalCount(proposal_id))
             .unwrap_or(0);
-        assert!(approvals >= cfg.guardian_threshold, "insufficient approvals");
+        assert!(
+            approvals >= cfg.guardian_threshold,
+            "insufficient approvals"
+        );
 
         let mut proposal = Self::load_proposal(&env, proposal_id);
         assert!(
@@ -525,10 +526,8 @@ impl GovernanceContract {
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
-        env.events().publish(
-            (symbol_short!("gov"), symbol_short!("gexec")),
-            proposal_id,
-        );
+        env.events()
+            .publish((symbol_short!("gov"), symbol_short!("gexec")), proposal_id);
     }
 
     /// Cancel a proposal. Only the proposer or admin may cancel.
@@ -716,7 +715,7 @@ impl GovernanceContract {
             return 0;
         }
         let mut x = n;
-        let mut y = (x + 1) / 2;
+        let mut y = x.div_ceil(2);
         while y < x {
             x = y;
             y = (x + n / x) / 2;
@@ -743,8 +742,7 @@ mod tests {
         let admin = Address::generate(&env);
 
         client.initialize(
-            &admin,
-            &100,   // timelock_delay
+            &admin, &100,   // timelock_delay
             &200,   // voting_period
             &10,    // voting_delay
             &1000,  // quorum_bps  (10 %)
@@ -805,9 +803,7 @@ mod tests {
     fn test_initialize_twice_panics() {
         let (env, admin, contract_id) = setup();
         let client = GovernanceContractClient::new(&env, &contract_id);
-        client.initialize(
-            &admin, &100, &200, &10, &1000, &5100, &100, &false, &2,
-        );
+        client.initialize(&admin, &100, &200, &10, &1000, &5100, &100, &false, &2);
     }
 
     #[test]
@@ -949,7 +945,13 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
         let proposer = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         assert_eq!(id, 0);
         assert_eq!(client.proposal_count(), 1);
 
@@ -985,7 +987,13 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
         let proposer = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         advance(&env, 10); // voting_delay = 10
         client.activate_proposal(&id);
         assert_eq!(client.get_proposal(&id).status, ProposalStatus::Active);
@@ -998,7 +1006,13 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
         let proposer = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.activate_proposal(&id); // no time advance
     }
 
@@ -1009,7 +1023,13 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
         let proposer = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
         client.activate_proposal(&id); // second call panics
@@ -1024,7 +1044,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&voter, &500);
         advance(&env, 10);
         client.activate_proposal(&id);
@@ -1046,7 +1072,13 @@ mod tests {
         let v1 = Address::generate(&env);
         let v2 = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&v1, &300);
         client.set_voting_power(&v2, &200);
         advance(&env, 10);
@@ -1068,7 +1100,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&voter, &500);
         advance(&env, 10);
         client.activate_proposal(&id);
@@ -1084,7 +1122,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
         client.cast_vote(&voter, &id, &VoteChoice::For);
@@ -1098,7 +1142,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&voter, &500);
         client.cast_vote(&voter, &id, &VoteChoice::For);
     }
@@ -1114,9 +1164,7 @@ mod tests {
         let admin = Address::generate(&env);
 
         // initialize with quadratic enabled
-        client.initialize(
-            &admin, &100, &200, &10, &1000, &5100, &100, &true, &2,
-        );
+        client.initialize(&admin, &100, &200, &10, &1000, &5100, &100, &true, &2);
 
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
@@ -1151,7 +1199,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&voter, &1000);
         advance(&env, 10);
         client.activate_proposal(&id);
@@ -1175,7 +1229,13 @@ mod tests {
         let big_holder = Address::generate(&env);
         client.set_voting_power(&big_holder, &10_000);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         // no votes cast
         advance(&env, 10);
         client.activate_proposal(&id);
@@ -1193,7 +1253,13 @@ mod tests {
         let v_for = Address::generate(&env);
         let v_against = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&v_for, &400);
         client.set_voting_power(&v_against, &600);
 
@@ -1214,7 +1280,13 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
         let proposer = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
         client.finalize_proposal(&id); // too early
@@ -1229,7 +1301,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&voter, &1000);
         advance(&env, 10);
         client.activate_proposal(&id);
@@ -1250,7 +1328,13 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
         let proposer = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
         advance(&env, 201);
@@ -1268,7 +1352,13 @@ mod tests {
         let voter = Address::generate(&env);
         let executor = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&voter, &1000);
         advance(&env, 10);
         client.activate_proposal(&id);
@@ -1293,7 +1383,13 @@ mod tests {
         let voter = Address::generate(&env);
         let executor = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&voter, &1000);
         advance(&env, 10);
         client.activate_proposal(&id);
@@ -1313,7 +1409,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let executor = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
         client.execute_proposal(&executor, &id);
@@ -1327,7 +1429,13 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
         let proposer = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.cancel_proposal(&proposer, &id);
         assert_eq!(client.get_proposal(&id).status, ProposalStatus::Cancelled);
     }
@@ -1338,7 +1446,13 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
         let proposer = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.cancel_proposal(&admin, &id);
         assert_eq!(client.get_proposal(&id).status, ProposalStatus::Cancelled);
     }
@@ -1351,7 +1465,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let stranger = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.cancel_proposal(&stranger, &id);
     }
 
@@ -1364,7 +1484,13 @@ mod tests {
         let voter = Address::generate(&env);
         let executor = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&voter, &1000);
         advance(&env, 10);
         client.activate_proposal(&id);
@@ -1390,7 +1516,13 @@ mod tests {
         client.add_guardian(&g1);
         client.add_guardian(&g2);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::EmergencyPause);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::EmergencyPause,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
 
@@ -1411,7 +1543,13 @@ mod tests {
         let g1 = Address::generate(&env);
 
         client.add_guardian(&g1);
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::EmergencyPause);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::EmergencyPause,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
         client.guardian_approve(&g1, &id);
@@ -1430,7 +1568,13 @@ mod tests {
         client.add_guardian(&g1);
         client.add_guardian(&g2);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
         client.guardian_approve(&g1, &id);
@@ -1446,7 +1590,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let stranger = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::EmergencyPause);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::EmergencyPause,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
         client.guardian_execute(&stranger, &id);
@@ -1461,7 +1611,13 @@ mod tests {
         let g1 = Address::generate(&env);
 
         client.add_guardian(&g1);
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::EmergencyPause);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::EmergencyPause,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
         client.guardian_approve(&g1, &id);
@@ -1476,7 +1632,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let stranger = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::EmergencyPause);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::EmergencyPause,
+        );
         advance(&env, 10);
         client.activate_proposal(&id);
         client.guardian_approve(&stranger, &id);
@@ -1514,7 +1676,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         assert!(client.get_vote(&id, &voter).is_none());
     }
 
@@ -1524,9 +1692,27 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
         let proposer = Address::generate(&env);
 
-        let id0 = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
-        let id1 = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::OperatorApproval);
-        let id2 = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::EmergencyPause);
+        let id0 = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
+        let id1 = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::OperatorApproval,
+        );
+        let id2 = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::EmergencyPause,
+        );
 
         assert_eq!(id0, 0);
         assert_eq!(id1, 1);
@@ -1548,7 +1734,7 @@ mod tests {
         client.initialize(&admin, &100, &200, &10, &1000, &5100, &100, &true, &2);
 
         let proposer = Address::generate(&env);
-        let voter0 = Address::generate(&env); // power = 0  (not used)
+        let _voter0 = Address::generate(&env); // power = 0  (not used)
         let voter1 = Address::generate(&env); // power = 1  -> sqrt = 1
         let voter4 = Address::generate(&env); // power = 4  -> sqrt = 2
         let voter9 = Address::generate(&env); // power = 9  -> sqrt = 3
@@ -1588,7 +1774,13 @@ mod tests {
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
 
-        let id = create_funded_proposal(&env, &client, &proposer, &admin, ProposalType::ParameterChange);
+        let id = create_funded_proposal(
+            &env,
+            &client,
+            &proposer,
+            &admin,
+            ProposalType::ParameterChange,
+        );
         client.set_voting_power(&voter, &500);
         advance(&env, 10);
         client.activate_proposal(&id);

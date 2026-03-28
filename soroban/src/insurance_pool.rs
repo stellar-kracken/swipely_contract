@@ -124,9 +124,13 @@ impl InsurancePoolContract {
         };
 
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::Governance, &governance);
+        env.storage()
+            .instance()
+            .set(&DataKey::Governance, &governance);
         env.storage().instance().set(&DataKey::ClaimCount, &0u64);
-        env.storage().instance().set(&DataKey::WithdrawalCount, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawalCount, &0u64);
     }
 
     /// Sets multi-sig approvers and payout threshold for claim approval.
@@ -139,10 +143,10 @@ impl InsurancePoolContract {
     ) {
         require_admin(&env, &admin);
 
-        if approvers.len() == 0 {
+        if approvers.is_empty() {
             panic!("approvers required");
         }
-        if approval_threshold == 0 || approval_threshold as usize > approvers.len() as usize {
+        if approval_threshold == 0 || approval_threshold > approvers.len() {
             panic!("invalid threshold");
         }
 
@@ -151,7 +155,9 @@ impl InsurancePoolContract {
             approval_threshold,
             withdrawal_delay_secs,
         };
-        env.storage().instance().set(&DataKey::Governance, &governance);
+        env.storage()
+            .instance()
+            .set(&DataKey::Governance, &governance);
     }
 
     /// Creates or updates a coverage pool for an asset.
@@ -256,8 +262,7 @@ impl InsurancePoolContract {
         }
 
         position.staked_amount = checked_sub(position.staked_amount, amount, "underflow");
-        position.pending_withdrawal =
-            checked_add(position.pending_withdrawal, amount, "overflow");
+        position.pending_withdrawal = checked_add(position.pending_withdrawal, amount, "overflow");
         pool.staked_liquidity = checked_sub(pool.staked_liquidity, amount, "underflow");
         pool.queued_withdrawals = checked_add(pool.queued_withdrawals, amount, "overflow");
 
@@ -288,12 +293,7 @@ impl InsurancePoolContract {
     }
 
     /// Executes a matured withdrawal request and removes liquidity from the pool.
-    pub fn execute_withdrawal(
-        env: Env,
-        staker: Address,
-        pool_id: String,
-        request_id: u64,
-    ) -> i128 {
+    pub fn execute_withdrawal(env: Env, staker: Address, pool_id: String, request_id: u64) -> i128 {
         staker.require_auth();
 
         let mut request: WithdrawalRequest = env
@@ -440,13 +440,7 @@ impl InsurancePoolContract {
     }
 
     /// Verifies a claim. Invalid claims can be slashed as anti-fraud protection.
-    pub fn verify_claim(
-        env: Env,
-        admin: Address,
-        claim_id: u64,
-        is_valid: bool,
-        slash_bps: u32,
-    ) {
+    pub fn verify_claim(env: Env, admin: Address, claim_id: u64, is_valid: bool, slash_bps: u32) {
         require_admin(&env, &admin);
 
         let mut claim = load_claim(&env, claim_id);
@@ -570,14 +564,22 @@ impl InsurancePoolContract {
     }
 
     pub fn get_pool(env: Env, pool_id: String) -> Option<PoolInfo> {
-        env.storage().instance().get(&DataKey::CoveragePool(pool_id))
+        env.storage()
+            .instance()
+            .get(&DataKey::CoveragePool(pool_id))
     }
 
     pub fn get_claim(env: Env, claim_id: u64) -> Option<ClaimInfo> {
-        env.storage().instance().get(&DataKey::InsuranceClaim(claim_id))
+        env.storage()
+            .instance()
+            .get(&DataKey::InsuranceClaim(claim_id))
     }
 
-    pub fn get_staker_position(env: Env, staker: Address, pool_id: String) -> Option<StakerPosition> {
+    pub fn get_staker_position(
+        env: Env,
+        staker: Address,
+        pool_id: String,
+    ) -> Option<StakerPosition> {
         env.storage()
             .instance()
             .get(&DataKey::StakerPosition(staker, pool_id))
@@ -653,7 +655,11 @@ fn save_claim(env: &Env, claim: &ClaimInfo) {
 }
 
 fn next_claim_id(env: &Env) -> u64 {
-    let id: u64 = env.storage().instance().get(&DataKey::ClaimCount).unwrap_or(0);
+    let id: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ClaimCount)
+        .unwrap_or(0);
     let next = id.checked_add(1).unwrap_or_else(|| panic!("id overflow"));
     env.storage().instance().set(&DataKey::ClaimCount, &next);
     id
@@ -666,7 +672,9 @@ fn next_withdrawal_id(env: &Env) -> u64 {
         .get(&DataKey::WithdrawalCount)
         .unwrap_or(0);
     let next = id.checked_add(1).unwrap_or_else(|| panic!("id overflow"));
-    env.storage().instance().set(&DataKey::WithdrawalCount, &next);
+    env.storage()
+        .instance()
+        .set(&DataKey::WithdrawalCount, &next);
     id
 }
 
@@ -781,15 +789,7 @@ mod test {
             &1_500u32,
         );
 
-        (
-            env,
-            client,
-            admin,
-            approver_1,
-            approver_2,
-            staker,
-            pool_id,
-        )
+        (env, client, admin, approver_1, approver_2, staker, pool_id)
     }
 
     #[test]
@@ -885,13 +885,7 @@ mod test {
 
         client.stake_liquidity(&staker, &pool_id, &10_000);
         let quoted = client.quote_premium(&pool_id, &1_000, &CoverageTier::Balanced);
-        client.purchase_coverage(
-            &buyer,
-            &pool_id,
-            &1_000,
-            &CoverageTier::Balanced,
-            &quoted,
-        );
+        client.purchase_coverage(&buyer, &pool_id, &1_000, &CoverageTier::Balanced, &quoted);
 
         let claim_id = client.submit_claim(
             &buyer,
@@ -911,13 +905,7 @@ mod test {
 
         client.stake_liquidity(&staker, &pool_id, &10_000);
         let quoted = client.quote_premium(&pool_id, &1_500, &CoverageTier::Balanced);
-        client.purchase_coverage(
-            &buyer,
-            &pool_id,
-            &1_500,
-            &CoverageTier::Balanced,
-            &quoted,
-        );
+        client.purchase_coverage(&buyer, &pool_id, &1_500, &CoverageTier::Balanced, &quoted);
 
         let claim_id = client.submit_claim(
             &buyer,
@@ -954,13 +942,7 @@ mod test {
 
         client.stake_liquidity(&staker, &pool_id, &8_000);
         let quoted = client.quote_premium(&pool_id, &3_000, &CoverageTier::Balanced);
-        client.purchase_coverage(
-            &buyer,
-            &pool_id,
-            &3_000,
-            &CoverageTier::Balanced,
-            &quoted,
-        );
+        client.purchase_coverage(&buyer, &pool_id, &3_000, &CoverageTier::Balanced, &quoted);
 
         let claim_id = client.submit_claim(
             &buyer,
