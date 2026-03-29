@@ -1947,8 +1947,10 @@ impl BridgeWatchContract {
 
         for entry in entries.iter() {
             acl::revoke_role_internal(&env, &entry.grantee, &entry.role);
-            env.events()
-                .publish((symbol_short!("acl_revk"), entry.grantee.clone()), entry.role);
+            env.events().publish(
+                (symbol_short!("acl_revk"), entry.grantee.clone()),
+                entry.role,
+            );
         }
     }
 
@@ -2530,7 +2532,9 @@ impl BridgeWatchContract {
             emergency: proposal.emergency,
             is_rollback: proposal.is_rollback,
             has_migration_callback: proposal.migration_callback.is_some(),
-            migration_callback: proposal.migration_callback.unwrap_or(env.current_contract_address()),
+            migration_callback: proposal
+                .migration_callback
+                .unwrap_or(env.current_contract_address()),
         });
         env.storage()
             .persistent()
@@ -3533,9 +3537,10 @@ impl BridgeWatchContract {
             );
 
             if asset.has_latest_price {
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::PriceRecord(asset.asset_code.clone()), &asset.latest_price);
+                env.storage().persistent().set(
+                    &DataKey::PriceRecord(asset.asset_code.clone()),
+                    &asset.latest_price,
+                );
             } else {
                 env.storage()
                     .persistent()
@@ -5218,7 +5223,10 @@ mod tests {
         let mut buf = [0u8; 256];
         asset_code.copy_into_slice(&mut buf[..len.min(256)]);
         let mut ci = 0;
-        while ci < len.min(256) { data.push_back(buf[ci]); ci += 1; }
+        while ci < len.min(256) {
+            data.push_back(buf[ci]);
+            ci += 1;
+        }
 
         let hs = health_score.to_be_bytes();
         let mut j = 0;
@@ -5266,7 +5274,10 @@ mod tests {
         let mut sid_buf = [0u8; 256];
         signer_id.copy_into_slice(&mut sid_buf[..sid_len.min(256)]);
         let mut si = 0;
-        while si < sid_len.min(256) { data.push_back(sid_buf[si]); si += 1; }
+        while si < sid_len.min(256) {
+            data.push_back(sid_buf[si]);
+            si += 1;
+        }
 
         let public_key_bytes = public_key.to_array();
         let mut j = 0;
@@ -7467,8 +7478,16 @@ mod tests {
 
         let entries = soroban_sdk::vec![
             &env,
-            acl::BulkRoleEntry { grantee: u1.clone(), role: acl::Role::Operator, expires_at: 0 },
-            acl::BulkRoleEntry { grantee: u2.clone(), role: acl::Role::ReadOnly, expires_at: 0 },
+            acl::BulkRoleEntry {
+                grantee: u1.clone(),
+                role: acl::Role::Operator,
+                expires_at: 0
+            },
+            acl::BulkRoleEntry {
+                grantee: u2.clone(),
+                role: acl::Role::ReadOnly,
+                expires_at: 0
+            },
         ];
         client.acl_bulk_grant_roles(&admin, &entries);
 
@@ -7484,15 +7503,31 @@ mod tests {
 
         let grant_entries = soroban_sdk::vec![
             &env,
-            acl::BulkRoleEntry { grantee: u1.clone(), role: acl::Role::Operator, expires_at: 0 },
-            acl::BulkRoleEntry { grantee: u2.clone(), role: acl::Role::ReadOnly, expires_at: 0 },
+            acl::BulkRoleEntry {
+                grantee: u1.clone(),
+                role: acl::Role::Operator,
+                expires_at: 0
+            },
+            acl::BulkRoleEntry {
+                grantee: u2.clone(),
+                role: acl::Role::ReadOnly,
+                expires_at: 0
+            },
         ];
         client.acl_bulk_grant_roles(&admin, &grant_entries);
 
         let revoke_entries = soroban_sdk::vec![
             &env,
-            acl::BulkRoleEntry { grantee: u1.clone(), role: acl::Role::Operator, expires_at: 0 },
-            acl::BulkRoleEntry { grantee: u2.clone(), role: acl::Role::ReadOnly, expires_at: 0 },
+            acl::BulkRoleEntry {
+                grantee: u1.clone(),
+                role: acl::Role::Operator,
+                expires_at: 0
+            },
+            acl::BulkRoleEntry {
+                grantee: u2.clone(),
+                role: acl::Role::ReadOnly,
+                expires_at: 0
+            },
         ];
         client.acl_bulk_revoke_roles(&admin, &revoke_entries);
 

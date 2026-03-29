@@ -276,12 +276,7 @@ pub fn has_permission_internal(env: &Env, address: &Address, permission: &Permis
 ///
 /// Calls `caller.require_auth()` and panics with a descriptive message if the
 /// check fails.
-pub fn require_permission(
-    env: &Env,
-    caller: &Address,
-    admin: &Address,
-    permission: &Permission,
-) {
+pub fn require_permission(env: &Env, caller: &Address, admin: &Address, permission: &Permission) {
     caller.require_auth();
     if caller == admin {
         return;
@@ -320,9 +315,7 @@ pub fn grant_role_internal(
                 expires_at,
             };
             grants.set(i, updated);
-            env.storage()
-                .persistent()
-                .set(&AclKey::RoleGrants, &grants);
+            env.storage().persistent().set(&AclKey::RoleGrants, &grants);
             return;
         }
     }
@@ -334,9 +327,7 @@ pub fn grant_role_internal(
         granted_at: now,
         expires_at,
     });
-    env.storage()
-        .persistent()
-        .set(&AclKey::RoleGrants, &grants);
+    env.storage().persistent().set(&AclKey::RoleGrants, &grants);
 }
 
 /// Internal: remove a role grant.
