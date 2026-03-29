@@ -367,12 +367,7 @@ impl CrossChainRelayContract {
         let mut i: u32 = 0;
         while i < items.len() {
             let item = items.get(i).unwrap();
-            let result = relay_message_internal(
-                &env,
-                &operator,
-                &item.message_id,
-                &item.signature,
-            );
+            let result = relay_message_internal(&env, &operator, &item.message_id, &item.signature);
 
             if result.is_ok() {
                 success_count = success_count.saturating_add(1);
@@ -471,21 +466,19 @@ impl CrossChainRelayContract {
                 .get::<RelayDataKey, CrossChainMessage>(&RelayDataKey::Message(id.clone()))
             {
                 if is_expired(&env, &msg)
-                    && (msg.status == MessageStatus::Pending || msg.status == MessageStatus::Verified)
+                    && (msg.status == MessageStatus::Pending
+                        || msg.status == MessageStatus::Verified)
                 {
                     let old = msg.status.clone();
                     msg.status = MessageStatus::Expired;
                     env.storage()
                         .persistent()
                         .set(&RelayDataKey::Message(id.clone()), &msg);
-                    events::emit_message_status_changed(
-                        &env,
-                        &id,
-                        &old,
-                        &MessageStatus::Expired,
-                    );
+                    events::emit_message_status_changed(&env, &id, &old, &MessageStatus::Expired);
                     remove = true;
-                } else if msg.status == MessageStatus::Relayed || msg.status == MessageStatus::Expired {
+                } else if msg.status == MessageStatus::Relayed
+                    || msg.status == MessageStatus::Expired
+                {
                     remove = true;
                 }
             } else {
@@ -1326,10 +1319,8 @@ mod tests {
         let (env, cid, operator) = setup_context();
         let client = CrossChainRelayContractClient::new(&env, &cid);
 
-        let result = client.try_register_relay_operator(
-            &operator,
-            &BytesN::from_array(&env, &[7u8; 32]),
-        );
+        let result =
+            client.try_register_relay_operator(&operator, &BytesN::from_array(&env, &[7u8; 32]));
         assert_eq!(result, Err(Ok(RelayError::OperatorAlreadyRegistered)));
     }
 
