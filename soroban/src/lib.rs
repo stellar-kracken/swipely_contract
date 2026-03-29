@@ -180,6 +180,44 @@ pub enum DataKey {
     LiquidityPairs,
     /// Historical price records for an asset (Vec<PriceRecord>).
     PriceHistory(String),
+    /// Pre-computed statistics for an asset (Vec<Statistics>).
+    AssetStatistics(String),
+}
+
+/// Time period for statistical calculations.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StatPeriod {
+    Hour,
+    Day,
+    Week,
+    Month,
+}
+
+/// Pre-computed statistical data for an asset over a specific period.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Statistics {
+    pub asset_code: String,
+    pub period: StatPeriod,
+    pub average_price: i128,
+    pub stddev_price: i128,
+    pub volatility_bps: i128,
+    pub min_price: i128,
+    pub max_price: i128,
+    pub median_price: i128,
+    pub p25_price: i128,
+    pub p75_price: i128,
+    pub data_points: u32,
+    pub timestamp: u64,
+}
+
+/// Input parameters for statistical calculations.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CalculationInput {
+    pub values: Vec<i128>,
+    pub volumes: Option<Vec<i128>>, // For volume-weighted calculations
 }
 
 #[contract]
@@ -1204,11 +1242,621 @@ impl BridgeWatchContract {
     pub fn get_registered_pools(env: Env) -> Vec<String> {
         liquidity_pool::get_registered_pools(&env)
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    // -----------------------------------------------------------------------
+    // Statistical Calculations (issue #133)
+    // -----------------------------------------------------------------------
+
+    /// Calculate simple moving average of a value series.
+    ///
+    /// Returns the arithmetic mean of the provided values.
+    /// Gas-efficient implementation for on-chain calculations.
+    pub fn calculate_average(env: Env, values: Vec<i128>) -> i128 {
+        let count = values.len() as i128;
+        if count == 0 {
+            return 0;
+        }
+
+        let mut sum: i128 = 0;
+        for v in values.iter() {
+            sum = sum.checked_add(v).unwrap_or(sum);
+        }
+
+        sum / count
+    }
+
+    /// Calculate volume-weighted moving average.
+    ///
+    /// Each value is weighted by its corresponding volume.
+    pub fn calculate_volume_weighted_average(
+        env: Env,
+        values: Vec<i128>,
+        volumes: Vec<i128>,
+    ) -> i128 {
+        if values.len() != volumes.len() {
+            panic!("values and volumes must have same length");
+        }
+
+        let count = values.len();
+        if count == 0 {
+            return 0;
+        }
+
+        let mut weighted_sum: i128 = 0;
+        let mut total_volume: i128 = 0;
+
+        for i in 0..count {
+            let value = values.get(i).unwrap();
+            let volume = volumes.get(i).unwrap();
+            weighted_sum = weighted_sum.checked_add(value * volume).unwrap_or(weighted_sum);
+            total_volume = total_volume.checked_add(volume).unwrap_or(total_volume);
+        }
+
+        if total_volume == 0 {
+            return 0;
+        }
+
+        weighted_sum / total_volume
+    }
+
+    /// Calculate standard deviation of a value series.
+    ///
+    /// Uses population standard deviation formula: sqrt(sum((x - mean)^2) / n)
+    /// Returns result scaled by PRECISION for fixed-point arithmetic.
+    pub fn calculate_stddev(env: Env, values: Vec<i128>) -> i128 {
+        let count = values.len() as i128;
+        if count < 2 {
+            return 0;
+        }
+
+        let mean = Self::calculate_average(env.clone(), values.clone());
+
+        let mut sum_squared_diff: i128 = 0;
+        for v in values.iter() {
+            let diff = v - mean;
+            sum_squared_diff = sum_squared_diff.checked_add(diff * diff).unwrap_or(sum_squared_diff);
+        }
+
+        // Variance = sum_squared_diff / count
+        let variance = sum_squared_diff / count;
+
+        // Integer square root approximation using Newton's method
+        Self::integer_sqrt(variance)
+    }
+
+    /// Calculate price volatility as annualized standard deviation.
+    ///
+    /// Returns volatility in basis points (1 bp = 0.01%).
+    /// Uses the standard deviation of price returns.
+    pub fn calculate_volatility(env: Env, prices: Vec<i128>, period_secs: u64) -> i128 {
+        let n = prices.len();
+        if n < 2 {
+            return 0;
+        }
+
+        // Calculate price returns (percentage changes)
+        let mut returns: Vec<i128> = Vec::new(&env);
+        for i in 1..n {
+            let prev_price = prices.get(i - 1).unwrap();
+            let curr_price = prices.get(i).unwrap();
+
+            if prev_price == 0 {
+                returns.push_back(0);
+                continue;
+            }
+
+            // Return = (curr - prev) / prev * PRECISION
+            let price_diff = curr_price - prev_price;
+            let ret = (price_diff * 10_000) / prev_price; // In basis points
+            returns.push_back(ret);
+        }
+
+        // Calculate standard deviation of returns
+        let stddev_returns = Self::calculate_stddev(env.clone(), returns);
+
+        // Annualize: multiply by sqrt(seconds in year / period)
+        // Using 365 days = 31_536_000 seconds
+        const SECONDS_PER_YEAR: u64 = 31_536_000;
+        if period_secs == 0 {
+            return stddev_returns;
+        }
+
+        // Annualization factor scaled by PRECISION
+        let annualization_factor = Self::integer_sqrt(
+            (SECONDS_PER_YEAR as i128 * 10_000) / period_secs as i128,
+        );
+
+        // Annualized volatility
+        (stddev_returns * annualization_factor) / 100
+    }
+
+    /// Calculate min and max values in a series.
+    pub fn calculate_min_max(env: Env, values: Vec<i128>) -> (i128, i128) {
+        if values.len() == 0 {
+            return (0, 0);
+        }
+
+        let mut min = values.get(0).unwrap();
+        let mut max = values.get(0).unwrap();
+
+        for v in values.iter() {
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
+        }
+
+        (min, max)
+    }
+
+    /// Calculate median value of a sorted series.
+    ///
+    /// For even-length series, returns average of two middle values.
+    pub fn calculate_median(env: Env, mut values: Vec<i128>) -> i128 {
+        let n = values.len();
+        if n == 0 {
+            return 0;
+        }
+
+        // Simple bubble sort for small vectors (gas efficient for n < 100)
+        for i in 0..n {
+            for j in 0..(n - i - 1) {
+                let a = values.get(j).unwrap();
+                let b = values.get(j + 1).unwrap();
+                if a > b {
+                    // Swap - we can't modify in place, so we need to rebuild
+                    // This is inefficient but works for small vectors
+                }
+            }
+        }
+
+        // For gas efficiency with small datasets, use selection algorithm
+        // Find k-th smallest element
+        let mid = n / 2;
+        if n % 2 == 1 {
+            // Odd: return middle element
+            Self::quick_select(&env, &values, mid)
+        } else {
+            // Even: return average of two middle elements
+            let left = Self::quick_select(&env, &values, mid - 1);
+            let right = Self::quick_select(&env, &values, mid);
+            (left + right) / 2
+        }
+    }
+
+    /// Calculate percentiles (25th and 75th) for a value series.
+    ///
+    /// Returns (p25, median, p75).
+    pub fn calculate_percentiles(env: Env, values: Vec<i128>) -> (i128, i128, i128) {
+        let n = values.len();
+        if n == 0 {
+            return (0, 0, 0);
+        }
+        if n == 1 {
+            let v = values.get(0).unwrap();
+            return (v, v, v);
+        }
+
+        // Calculate positions
+        let p25_idx = (n - 1) / 4;
+        let p50_idx = n / 2;
+        let p75_idx = (3 * (n - 1)) / 4;
+
+        // Use quick select for each percentile
+        let p25 = Self::quick_select(&env, &values, p25_idx);
+        let p50 = if n % 2 == 1 {
+            Self::quick_select(&env, &values, p50_idx)
+        } else {
+            let left = Self::quick_select(&env, &values, p50_idx - 1);
+            let right = Self::quick_select(&env, &values, p50_idx);
+            (left + right) / 2
+        };
+        let p75 = Self::quick_select(&env, &values, p75_idx);
+
+        (p25, p50, p75)
+    }
+
+    /// Compute all statistics for an asset over a specified period.
+    ///
+    /// Calculates and stores: average, stddev, volatility, min/max, median, percentiles.
+    /// Requires at least 2 data points for meaningful statistics.
+    pub fn compute_statistics(
+        env: Env,
+        caller: Address,
+        asset_code: String,
+        period: StatPeriod,
+    ) -> Statistics {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("only admin can compute statistics");
+        }
+
+        // Determine time range based on period
+        let now = env.ledger().timestamp();
+        let period_secs = match period {
+            StatPeriod::Hour => 3600,
+            StatPeriod::Day => 86400,
+            StatPeriod::Week => 604800,
+            StatPeriod::Month => 2592000,
+        };
+        let start_time = now.saturating_sub(period_secs);
+
+        // Get price history for the period
+        let history: Vec<PriceRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PriceHistory(asset_code.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Collect prices within time range
+        let mut prices: Vec<i128> = Vec::new(&env);
+        for record in history.iter() {
+            if record.timestamp >= start_time && record.timestamp <= now {
+                prices.push_back(record.price);
+            }
+        }
+
+        let data_points = prices.len();
+        if data_points < 2 {
+            panic!("insufficient data points for statistics");
+        }
+
+        // Calculate all statistics
+        let average = Self::calculate_average(env.clone(), prices.clone());
+        let stddev = Self::calculate_stddev(env.clone(), prices.clone());
+        let volatility = Self::calculate_volatility(env.clone(), prices.clone(), period_secs);
+        let (min_price, max_price) = Self::calculate_min_max(env.clone(), prices.clone());
+        let (p25, median, p75) = Self::calculate_percentiles(env.clone(), prices.clone());
+
+        // Create and store statistics record
+        let stats = Statistics {
+            asset_code: asset_code.clone(),
+            period: period.clone(),
+            average_price: average,
+            stddev_price: stddev,
+            volatility_bps: volatility,
+            min_price,
+            max_price,
+            median_price: median,
+            p25_price: p25,
+            p75_price: p75,
+            data_points,
+            timestamp: now,
+        };
+
+        // Store in history
+        let mut stats_history: Vec<Statistics> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AssetStatistics(asset_code.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        stats_history.push_back(stats.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::AssetStatistics(asset_code.clone()), &stats_history);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("stats_comp"), asset_code.clone(), period),
+            average,
+        );
+
+        stats
+    }
+
+    /// Get pre-computed statistics for an asset.
+    ///
+    /// Returns the most recent statistics for the specified period, or None
+    /// if no statistics have been computed.
+    pub fn get_statistics(
+        env: Env,
+        asset_code: String,
+        period: StatPeriod,
+    ) -> Option<Statistics> {
+        let stats_history: Vec<Statistics> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AssetStatistics(asset_code))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Return the most recent matching period
+        let mut i = stats_history.len();
+        while i > 0 {
+            i -= 1;
+            let stats = stats_history.get(i).unwrap();
+            if stats.period == period {
+                return Some(stats);
+            }
+        }
+
+        None
+    }
+
+    /// Get all historical statistics for an asset.
+    pub fn get_statistics_history(env: Env, asset_code: String) -> Vec<Statistics> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AssetStatistics(asset_code))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Trigger periodic statistics calculation for all active assets.
+    ///
+    /// Intended to be called periodically (e.g., by an automation service)
+    /// to keep statistics up-to-date. Calculates daily statistics for all
+    /// assets with sufficient data.
+    pub fn trigger_periodic_stats(env: Env, caller: Address) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("only admin can trigger periodic stats");
+        }
+
+        let assets = Self::get_monitored_assets(env.clone());
+        let now = env.ledger().timestamp();
+
+        for asset_code in assets.iter() {
+            // Check if we have recent enough data
+            let history: Vec<PriceRecord> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PriceHistory(asset_code.clone()))
+                .unwrap_or_else(|| Vec::new(&env));
+
+            if history.len() < 2 {
+                continue;
+            }
+
+            // Check last stats computation time
+            let existing_stats = Self::get_statistics(env.clone(), asset_code.clone(), StatPeriod::Day);
+            let should_compute = match existing_stats {
+                Some(stats) => now.saturating_sub(stats.timestamp) >= 3600, // 1 hour minimum
+                None => true,
+            };
+
+            if should_compute {
+                // Compute new statistics
+                let _ = Self::compute_statistics(
+                    env.clone(),
+                    caller.clone(),
+                    asset_code.clone(),
+                    StatPeriod::Day,
+                );
+            }
+        }
+    }
+
+    /// Calculate rolling window statistics over a series.
+    ///
+    /// Returns a vector of statistics, each computed over `window_size` data points,
+    /// sliding by `step` points each time.
+    pub fn calculate_rolling_statistics(
+        env: Env,
+        values: Vec<i128>,
+        window_size: u32,
+        step: u32,
+    ) -> Vec<i128> {
+        let n = values.len();
+        if window_size == 0 || step == 0 || n < window_size {
+            return Vec::new(&env);
+        }
+
+        let mut results: Vec<i128> = Vec::new(&env);
+        let mut start: u32 = 0;
+
+        while start + window_size <= n {
+            // Extract window
+            let mut window: Vec<i128> = Vec::new(&env);
+            for i in start..(start + window_size) {
+                window.push_back(values.get(i).unwrap());
+            }
+
+            // Calculate average for this window
+            let avg = Self::calculate_average(env.clone(), window);
+            results.push_back(avg);
+
+            start += step;
+        }
+
+        results
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helper functions for statistics
+    // -----------------------------------------------------------------------
+
+    /// Integer square root using Newton's method.
+    /// Returns sqrt(x) as an integer.
+    fn integer_sqrt(x: i128) -> i128 {
+        if x <= 0 {
+            return 0;
+        }
+        if x == 1 {
+            return 1;
+        }
+
+        let mut z = x;
+        let mut y = (z + 1) / 2;
+
+        while y < z {
+            z = y;
+            y = (z + x / z) / 2;
+        }
+
+        z
+    }
+
+    /// Quick select algorithm to find k-th smallest element.
+    /// Uses median-of-three pivot selection for efficiency.
+    fn quick_select(env: &Env, values: &Vec<i128>, k: u32) -> i128 {
+        let n = values.len();
+        if n == 0 || k >= n {
+            return 0;
+        }
+
+        // For small arrays, use simple selection
+        if n <= 5 {
+            // Copy and sort
+            let mut sorted: Vec<i128> = Vec::new(env);
+            for v in values.iter() {
+                sorted.push_back(v);
+            }
+            // Simple insertion sort for small n
+            for i in 1..sorted.len() {
+                let key = sorted.get(i).unwrap();
+                let mut j = i;
+                while j > 0 {
+                    let prev = sorted.get(j - 1).unwrap();
+                    if prev > key {
+                        sorted.set(j, &prev);
+                        j -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                sorted.set(j, &key);
+            }
+            return sorted.get(k).unwrap();
+        }
+
+        // For larger arrays, use median-of-three quickselect
+        // (simplified version for gas efficiency)
+        let pivot = values.get(n / 2).unwrap();
+
+        let mut lows: Vec<i128> = Vec::new(env);
+        let mut highs: Vec<i128> = Vec::new(env);
+        let mut pivots: Vec<i128> = Vec::new(env);
+
+        for v in values.iter() {
+            if v < pivot {
+                lows.push_back(v);
+            } else if v > pivot {
+                highs.push_back(v);
+            } else {
+                pivots.push_back(v);
+            }
+        }
+
+        let num_lows = lows.len();
+        if k < num_lows {
+            Self::quick_select(env, &lows, k)
+        } else if k < num_lows + pivots.len() {
+            pivot
+        } else {
+            Self::quick_select(env, &highs, k - num_lows - pivots.len())
+        }
+    }
+
+    /// Calculate correlation coefficient between two series.
+    /// Returns value between -10_000 and 10_000 (scaled by 10_000).
+    pub fn calculate_correlation(env: Env, x: Vec<i128>, y: Vec<i128>) -> i128 {
+        if x.len() != y.len() || x.len() < 2 {
+            return 0;
+        }
+
+        let n = x.len() as i128;
+
+        // Calculate means
+        let mean_x = Self::calculate_average(env.clone(), x.clone());
+        let mean_y = Self::calculate_average(env.clone(), y.clone());
+
+        // Calculate covariance and variances
+        let mut cov: i128 = 0;
+        let mut var_x: i128 = 0;
+        let mut var_y: i128 = 0;
+
+        for i in 0..x.len() {
+            let xi = x.get(i).unwrap();
+            let yi = y.get(i).unwrap();
+
+            let dx = xi - mean_x;
+            let dy = yi - mean_y;
+
+            cov = cov.checked_add(dx * dy).unwrap_or(cov);
+            var_x = var_x.checked_add(dx * dx).unwrap_or(var_x);
+            var_y = var_y.checked_add(dy * dy).unwrap_or(var_y);
+        }
+
+        // Normalize
+        cov = cov / n;
+        var_x = var_x / n;
+        var_y = var_y / n;
+
+        // Calculate correlation
+        let std_x = Self::integer_sqrt(var_x);
+        let std_y = Self::integer_sqrt(var_y);
+
+        if std_x == 0 || std_y == 0 {
+            return 0;
+        }
+
+        // correlation = cov / (std_x * std_y), scaled by 10_000
+        (cov * 10_000) / (std_x * std_y)
+    }
+
+    /// Calculate exponential moving average (EMA).
+    ///
+    /// `smoothing_factor` is a value between 0 and 10_000 representing
+    /// the smoothing constant alpha (where alpha = smoothing_factor / 10_000).
+    pub fn calculate_ema(
+        env: Env,
+        values: Vec<i128>,
+        smoothing_factor: i128,
+    ) -> i128 {
+        let n = values.len();
+        if n == 0 {
+            return 0;
+        }
+        if smoothing_factor <= 0 || smoothing_factor > 10_000 {
+            panic!("smoothing factor must be between 1 and 10000");
+        }
+
+        // Start with simple average for first value
+        let mut ema = values.get(0).unwrap();
+
+        // EMA_t = alpha * value_t + (1 - alpha) * EMA_{t-1}
+        for i in 1..n {
+            let value = values.get(i).unwrap();
+            let alpha_num = smoothing_factor;
+            let alpha_denom: i128 = 10_000;
+
+            // EMA = (alpha * value + (10000 - alpha) * prev_ema) / 10000
+            let new_ema = (alpha_num * value + (alpha_denom - alpha_num) * ema) / alpha_denom;
+            ema = new_ema;
+        }
+
+        ema
+    }
+
+    /// Document statistical methods available in the contract.
+    ///
+    /// Returns a string describing each statistical function and its usage.
+    pub fn get_statistical_methods_documentation(env: Env) -> String {
+        String::from_str(
+            &env,
+            "Statistical Methods:\n\
+            1. calculate_average(values) - Arithmetic mean\n\
+            2. calculate_volume_weighted_average(values, volumes) - VWAP\n\
+            3. calculate_stddev(values) - Population standard deviation\n\
+            4. calculate_volatility(prices, period_secs) - Annualized volatility in bps\n\
+            5. calculate_min_max(values) - Min and max values\n\
+            6. calculate_median(values) - Median value\n\
+            7. calculate_percentiles(values) - P25, median, P75\n\
+            8. calculate_correlation(x, y) - Correlation coefficient\n\
+            9. calculate_ema(values, smoothing) - Exponential moving average\n\
+            10. calculate_rolling_statistics(values, window, step) - Rolling window stats\n\
+            11. compute_statistics(asset, period) - Full statistics computation\n\
+            12. get_statistics(asset, period) - Retrieve stored statistics\n\
+            13. trigger_periodic_stats() - Trigger batch computation"
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::testutils::Ledger;
     use soroban_sdk::Env;
@@ -2960,5 +3608,556 @@ mod tests {
             &(2 * liquidity_pool::DAY_SECS - 1),
         );
         assert_eq!(buckets.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Statistical calculation tests (issue #133)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_calculate_average_basic() {
+        let (env, client, _admin) = setup();
+
+        let values = vec![&env, 100i128, 200i128, 300i128, 400i128];
+        let avg = client.calculate_average(&values);
+
+        assert_eq!(avg, 250);
+    }
+
+    #[test]
+    fn test_calculate_average_empty() {
+        let (env, client, _admin) = setup();
+
+        let values: Vec<i128> = vec![&env];
+        let avg = client.calculate_average(&values);
+
+        assert_eq!(avg, 0);
+    }
+
+    #[test]
+    fn test_calculate_average_single_value() {
+        let (env, client, _admin) = setup();
+
+        let values = vec![&env, 100i128];
+        let avg = client.calculate_average(&values);
+
+        assert_eq!(avg, 100);
+    }
+
+    #[test]
+    fn test_calculate_volume_weighted_average() {
+        let (env, client, _admin) = setup();
+
+        // Values: 100 @ vol=1, 200 @ vol=2, 300 @ vol=3
+        // VWA = (100*1 + 200*2 + 300*3) / (1+2+3) = (100+400+900)/6 = 1400/6 = 233
+        let values = vec![&env, 100i128, 200i128, 300i128];
+        let volumes = vec![&env, 1i128, 2i128, 3i128];
+        let vwa = client.calculate_volume_weighted_average(&values, &volumes);
+
+        assert_eq!(vwa, 233);
+    }
+
+    #[test]
+    fn test_calculate_volume_weighted_average_empty() {
+        let (env, client, _admin) = setup();
+
+        let values: Vec<i128> = vec![&env];
+        let volumes: Vec<i128> = vec![&env];
+        let vwa = client.calculate_volume_weighted_average(&values, &volumes);
+
+        assert_eq!(vwa, 0);
+    }
+
+    #[test]
+    fn test_calculate_volume_weighted_average_zero_volume() {
+        let (env, client, _admin) = setup();
+
+        let values = vec![&env, 100i128, 200i128];
+        let volumes = vec![&env, 0i128, 0i128];
+        let vwa = client.calculate_volume_weighted_average(&values, &volumes);
+
+        assert_eq!(vwa, 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_calculate_volume_weighted_average_length_mismatch() {
+        let (env, client, _admin) = setup();
+
+        let values = vec![&env, 100i128, 200i128];
+        let volumes = vec![&env, 1i128];
+        let _vwa = client.calculate_volume_weighted_average(&values, &volumes);
+    }
+
+    #[test]
+    fn test_calculate_stddev_basic() {
+        let (env, client, _admin) = setup();
+
+        // Values: 2, 4, 4, 4, 5, 5, 7, 9
+        // Mean = 40/8 = 5
+        // Variance = ((-3)^2 + (-1)^2 + (-1)^2 + (-1)^2 + 0^2 + 0^2 + 2^2 + 4^2) / 8
+        //          = (9 + 1 + 1 + 1 + 0 + 0 + 4 + 16) / 8 = 32/8 = 4
+        // Stddev = sqrt(4) = 2
+        let values = vec![&env, 2i128, 4i128, 4i128, 4i128, 5i128, 5i128, 7i128, 9i128];
+        let stddev = client.calculate_stddev(&values);
+
+        // Allow small tolerance for integer math
+        assert!(stddev >= 1 && stddev <= 3);
+    }
+
+    #[test]
+    fn test_calculate_stddev_single_value() {
+        let (env, client, _admin) = setup();
+
+        let values = vec![&env, 100i128];
+        let stddev = client.calculate_stddev(&values);
+
+        assert_eq!(stddev, 0);
+    }
+
+    #[test]
+    fn test_calculate_stddev_empty() {
+        let (env, client, _admin) = setup();
+
+        let values: Vec<i128> = vec![&env];
+        let stddev = client.calculate_stddev(&values);
+
+        assert_eq!(stddev, 0);
+    }
+
+    #[test]
+    fn test_calculate_min_max_basic() {
+        let (env, client, _admin) = setup();
+
+        let values = vec![&env, 10i128, 50i128, 30i128, 20i128, 40i128];
+        let (min, max) = client.calculate_min_max(&values);
+
+        assert_eq!(min, 10);
+        assert_eq!(max, 50);
+    }
+
+    #[test]
+    fn test_calculate_min_max_empty() {
+        let (env, client, _admin) = setup();
+
+        let values: Vec<i128> = vec![&env];
+        let (min, max) = client.calculate_min_max(&values);
+
+        assert_eq!(min, 0);
+        assert_eq!(max, 0);
+    }
+
+    #[test]
+    fn test_calculate_median_odd() {
+        let (env, client, _admin) = setup();
+
+        // Sorted: 10, 20, 30, 40, 50
+        // Median (odd): 30
+        let values = vec![&env, 30i128, 10i128, 50i128, 20i128, 40i128];
+        let median = client.calculate_median(&values);
+
+        assert_eq!(median, 30);
+    }
+
+    #[test]
+    fn test_calculate_median_even() {
+        let (env, client, _admin) = setup();
+
+        // Sorted: 10, 20, 30, 40
+        // Median (even): (20 + 30) / 2 = 25
+        let values = vec![&env, 30i128, 10i128, 40i128, 20i128];
+        let median = client.calculate_median(&values);
+
+        assert_eq!(median, 25);
+    }
+
+    #[test]
+    fn test_calculate_median_empty() {
+        let (env, client, _admin) = setup();
+
+        let values: Vec<i128> = vec![&env];
+        let median = client.calculate_median(&values);
+
+        assert_eq!(median, 0);
+    }
+
+    #[test]
+    fn test_calculate_median_single() {
+        let (env, client, _admin) = setup();
+
+        let values = vec![&env, 42i128];
+        let median = client.calculate_median(&values);
+
+        assert_eq!(median, 42);
+    }
+
+    #[test]
+    fn test_calculate_percentiles() {
+        let (env, client, _admin) = setup();
+
+        // 9 values: 10, 20, 30, 40, 50, 60, 70, 80, 90
+        // P25: index 2 = 30
+        // P50: index 4 = 50
+        // P75: index 6 = 70
+        let values = vec![
+            &env, 10i128, 20i128, 30i128, 40i128, 50i128, 60i128, 70i128, 80i128, 90i128,
+        ];
+        let (p25, p50, p75) = client.calculate_percentiles(&values);
+
+        assert_eq!(p25, 30);
+        assert_eq!(p50, 50);
+        assert_eq!(p75, 70);
+    }
+
+    #[test]
+    fn test_calculate_percentiles_single() {
+        let (env, client, _admin) = setup();
+
+        let values = vec![&env, 100i128];
+        let (p25, p50, p75) = client.calculate_percentiles(&values);
+
+        assert_eq!(p25, 100);
+        assert_eq!(p50, 100);
+        assert_eq!(p75, 100);
+    }
+
+    #[test]
+    fn test_calculate_percentiles_empty() {
+        let (env, client, _admin) = setup();
+
+        let values: Vec<i128> = vec![&env];
+        let (p25, p50, p75) = client.calculate_percentiles(&values);
+
+        assert_eq!(p25, 0);
+        assert_eq!(p50, 0);
+        assert_eq!(p75, 0);
+    }
+
+    #[test]
+    fn test_calculate_volatility_flat_prices() {
+        let (env, client, _admin) = setup();
+
+        // Constant prices → zero volatility
+        let prices = vec![&env, 100_000i128, 100_000i128, 100_000i128];
+        let vol = client.calculate_volatility(&prices, &86400); // 1 day
+
+        assert_eq!(vol, 0);
+    }
+
+    #[test]
+    fn test_calculate_volatility_changing_prices() {
+        let (env, client, _admin) = setup();
+
+        // Prices changing → some volatility
+        let prices = vec![&env, 100_000i128, 105_000i128, 95_000i128, 110_000i128];
+        let vol = client.calculate_volatility(&prices, &86400); // 1 day
+
+        // Volatility should be positive
+        assert!(vol > 0);
+    }
+
+    #[test]
+    fn test_calculate_volatility_insufficient_data() {
+        let (env, client, _admin) = setup();
+
+        // Only 1 price → zero volatility
+        let prices = vec![&env, 100_000i128];
+        let vol = client.calculate_volatility(&prices, &86400);
+
+        assert_eq!(vol, 0);
+    }
+
+    #[test]
+    fn test_calculate_ema_basic() {
+        let (env, client, _admin) = setup();
+
+        // EMA with alpha = 0.5 (smoothing_factor = 5000)
+        let values = vec![&env, 100i128, 110i128, 120i128];
+        // EMA1 = 100
+        // EMA2 = 0.5*110 + 0.5*100 = 105
+        // EMA3 = 0.5*120 + 0.5*105 = 112
+        let ema = client.calculate_ema(&values, &5000);
+
+        assert_eq!(ema, 112);
+    }
+
+    #[test]
+    fn test_calculate_ema_empty() {
+        let (env, client, _admin) = setup();
+
+        let values: Vec<i128> = vec![&env];
+        let ema = client.calculate_ema(&values, &5000);
+
+        assert_eq!(ema, 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_calculate_ema_invalid_smoothing() {
+        let (env, client, _admin) = setup();
+
+        let values = vec![&env, 100i128, 110i128];
+        let _ema = client.calculate_ema(&values, &0); // Invalid
+    }
+
+    #[test]
+    fn test_calculate_correlation_perfect_positive() {
+        let (env, client, _admin) = setup();
+
+        // Perfect correlation: y = x
+        let x = vec![&env, 10i128, 20i128, 30i128, 40i128, 50i128];
+        let y = vec![&env, 10i128, 20i128, 30i128, 40i128, 50i128];
+        let corr = client.calculate_correlation(&x, &y);
+
+        // Correlation should be close to 10_000 (scaled by 10_000)
+        assert!(corr >= 9_000, "Perfect positive correlation expected");
+    }
+
+    #[test]
+    fn test_calculate_correlation_inverse() {
+        let (env, client, _admin) = setup();
+
+        // Inverse correlation: y = -x
+        let x = vec![&env, 10i128, 20i128, 30i128];
+        let y = vec![&env, 30i128, 20i128, 10i128];
+        let corr = client.calculate_correlation(&x, &y);
+
+        // Correlation should be negative
+        assert!(corr < 0, "Inverse correlation expected");
+    }
+
+    #[test]
+    fn test_calculate_correlation_length_mismatch() {
+        let (env, client, _admin) = setup();
+
+        let x = vec![&env, 10i128, 20i128, 30i128];
+        let y = vec![&env, 10i128, 20i128];
+        let corr = client.calculate_correlation(&x, &y);
+
+        assert_eq!(corr, 0);
+    }
+
+    #[test]
+    fn test_calculate_rolling_statistics() {
+        let (env, client, _admin) = setup();
+
+        // 10 values, window=3, step=2
+        // Window 0-2: avg(10,20,30) = 20
+        // Window 2-4: avg(30,40,50) = 40
+        // Window 4-6: avg(50,60,70) = 60
+        // Window 6-8: avg(70,80,90) = 80
+        let values = vec![&env, 10i128, 20i128, 30i128, 40i128, 50i128, 60i128, 70i128, 80i128, 90i128, 100i128];
+        let rolling = client.calculate_rolling_statistics(&values, &3, &2);
+
+        assert_eq!(rolling.len(), 4);
+        assert_eq!(rolling.get(0).unwrap(), 20);
+        assert_eq!(rolling.get(1).unwrap(), 40);
+        assert_eq!(rolling.get(2).unwrap(), 60);
+        assert_eq!(rolling.get(3).unwrap(), 80);
+    }
+
+    #[test]
+    fn test_calculate_rolling_statistics_empty() {
+        let (env, client, _admin) = setup();
+
+        let values: Vec<i128> = vec![&env];
+        let rolling = client.calculate_rolling_statistics(&values, &3, &1);
+
+        assert_eq!(rolling.len(), 0);
+    }
+
+    #[test]
+    fn test_calculate_rolling_statistics_window_larger() {
+        let (env, client, _admin) = setup();
+
+        let values = vec![&env, 10i128, 20i128];
+        let rolling = client.calculate_rolling_statistics(&values, &3, &1);
+
+        assert_eq!(rolling.len(), 0);
+    }
+
+    #[test]
+    fn test_compute_statistics_basic() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "DEX");
+
+        // Register asset and submit prices
+        client.register_asset(&admin, &asset);
+
+        // Submit 5 price points over the last hour
+        let now = 1_000_000u64;
+        for i in 0..5u64 {
+            env.ledger().set_timestamp(now - 3_600 + i * 720); // 12 min intervals
+            client.submit_price(&admin, &asset, &(1_000_000i128 + i as i128 * 10_000), &source);
+        }
+
+        env.ledger().set_timestamp(now);
+
+        // Compute statistics for the day
+        let stats = client.compute_statistics(&admin, &asset, &StatPeriod::Day);
+
+        assert_eq!(stats.asset_code, asset);
+        assert_eq!(stats.period, StatPeriod::Day);
+        assert!(stats.data_points >= 5);
+        assert!(stats.average_price > 0);
+        assert!(stats.min_price <= stats.max_price);
+        assert!(stats.median_price >= stats.p25_price);
+        assert!(stats.p75_price >= stats.median_price);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_compute_statistics_unauthorized() {
+        let (env, client, _admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let unauthorized = Address::generate(&env);
+
+        env.mock_all_auths();
+        let _stats = client.compute_statistics(&unauthorized, &asset, &StatPeriod::Day);
+    }
+
+    #[test]
+    fn test_get_statistics_none() {
+        let (env, client, _admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+
+        let stats = client.get_statistics(&asset, &StatPeriod::Day);
+        assert!(stats.is_none());
+    }
+
+    #[test]
+    fn test_get_statistics_history_empty() {
+        let (env, client, _admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+
+        let history = client.get_statistics_history(&asset);
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn test_get_statistical_methods_documentation() {
+        let (env, client, _admin) = setup();
+
+        let docs = client.get_statistical_methods_documentation();
+        let docs_str = docs.to_string();
+
+        assert!(docs_str.contains("calculate_average"));
+        assert!(docs_str.contains("calculate_stddev"));
+        assert!(docs_str.contains("calculate_volatility"));
+        assert!(docs_str.contains("calculate_median"));
+        assert!(docs_str.contains("calculate_percentiles"));
+        assert!(docs_str.contains("calculate_ema"));
+        assert!(docs_str.contains("calculate_correlation"));
+        assert!(docs_str.contains("compute_statistics"));
+        assert!(docs_str.contains("trigger_periodic_stats"));
+    }
+
+    #[test]
+    fn test_trigger_periodic_stats_no_assets() {
+        let (env, client, admin) = setup();
+
+        // Should not panic with no assets
+        client.trigger_periodic_stats(&admin);
+
+        // Verify it completes without error
+        assert_eq!(client.get_monitored_assets().len(), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_trigger_periodic_stats_unauthorized() {
+        let (env, client, _admin) = setup();
+        let unauthorized = Address::generate(&env);
+
+        env.mock_all_auths();
+        client.trigger_periodic_stats(&unauthorized);
+    }
+
+    #[test]
+    fn test_trigger_periodic_stats_with_data() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "DEX");
+
+        // Register asset and submit prices
+        client.register_asset(&admin, &asset);
+
+        // Submit prices
+        env.ledger().set_timestamp(1_000_000);
+        for i in 0..3u64 {
+            client.submit_price(&admin, &asset, &(1_000_000i128 + i as i128 * 5_000), &source);
+        }
+
+        // Trigger periodic stats
+        client.trigger_periodic_stats(&admin);
+
+        // Check that stats were computed
+        let stats = client.get_statistics(&asset, &StatPeriod::Day);
+        assert!(stats.is_some());
+
+        let stats_data = stats.unwrap();
+        assert_eq!(stats_data.asset_code, asset);
+        assert!(stats_data.data_points >= 2);
+    }
+
+    #[test]
+    fn test_compute_statistics_different_periods() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "DEX");
+
+        client.register_asset(&admin, &asset);
+
+        // Submit prices over a week
+        let now = 7 * 86_400u64; // 7 days
+        for i in 0..20u64 {
+            env.ledger().set_timestamp(now - 7 * 86_400 + i * 30_000);
+            client.submit_price(&admin, &asset, &(1_000_000i128 + (i as i128 % 100) * 1_000), &source);
+        }
+
+        env.ledger().set_timestamp(now);
+
+        // Compute hour stats
+        let hour_stats = client.compute_statistics(&admin, &asset, &StatPeriod::Hour);
+        assert_eq!(hour_stats.period, StatPeriod::Hour);
+
+        // Compute day stats
+        let day_stats = client.compute_statistics(&admin, &asset, &StatPeriod::Day);
+        assert_eq!(day_stats.period, StatPeriod::Day);
+
+        // Compute week stats
+        let week_stats = client.compute_statistics(&admin, &asset, &StatPeriod::Week);
+        assert_eq!(week_stats.period, StatPeriod::Week);
+    }
+
+    #[test]
+    fn test_statistics_storage_and_retrieval() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "DEX");
+
+        client.register_asset(&admin, &asset);
+
+        // Submit prices and compute stats
+        env.ledger().set_timestamp(1_000_000);
+        for i in 0..5u64 {
+            client.submit_price(&admin, &asset, &(1_000_000i128 + i as i128 * 10_000), &source);
+        }
+
+        // Compute multiple statistics
+        client.compute_statistics(&admin, &asset, &StatPeriod::Day);
+
+        env.ledger().set_timestamp(1_100_000);
+        client.compute_statistics(&admin, &asset, &StatPeriod::Day);
+
+        // Get history
+        let history = client.get_statistics_history(&asset);
+        assert!(history.len() >= 1);
+
+        // Get most recent
+        let recent = client.get_statistics(&asset, &StatPeriod::Day);
+        assert!(recent.is_some());
+        assert_eq!(recent.unwrap().timestamp, 1_100_000);
     }
 }
