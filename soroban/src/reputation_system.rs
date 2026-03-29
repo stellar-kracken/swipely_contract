@@ -740,11 +740,20 @@ impl ReputationSystemContract {
             return REPUTATION_SCALE;
         }
 
-        // Use exponential decay: factor = 0.5^(time / half-life)
-        let half_lives = (time_since_update as f64) / (TIME_DECAY_HALFLIFE as f64);
-        let decay_factor = 0.5f64.powf(half_lives);
+        // no_std-friendly approximation: apply one halving per elapsed half-life.
+        let elapsed_half_lives = time_since_update / TIME_DECAY_HALFLIFE;
+        let mut factor = REPUTATION_SCALE;
+        let mut i = 0u64;
 
-        (decay_factor * (REPUTATION_SCALE as f64)) as u32
+        while i < elapsed_half_lives {
+            factor /= 2;
+            if factor == 0 {
+                break;
+            }
+            i += 1;
+        }
+
+        factor
     }
 
     /// Calculate badge level based on reputation score

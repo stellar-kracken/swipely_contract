@@ -209,10 +209,8 @@ pub fn has_role_internal(env: &Env, address: &Address, role: &Role) -> bool {
         .unwrap_or_else(|| Vec::new(env));
 
     for g in grants.iter() {
-        if &g.grantee == address && &g.role == role {
-            if g.expires_at == 0 || g.expires_at > now {
-                return true;
-            }
+        if &g.grantee == address && &g.role == role && (g.expires_at == 0 || g.expires_at > now) {
+            return true;
         }
     }
     false
@@ -259,10 +257,11 @@ pub fn has_permission_internal(env: &Env, address: &Address, permission: &Permis
         .unwrap_or_else(|| Vec::new(env));
 
     for pg in perm_grants.iter() {
-        if &pg.grantee == address && &pg.permission == permission {
-            if pg.expires_at == 0 || pg.expires_at > now {
-                return true;
-            }
+        if &pg.grantee == address
+            && &pg.permission == permission
+            && (pg.expires_at == 0 || pg.expires_at > now)
+        {
+            return true;
         }
     }
 
