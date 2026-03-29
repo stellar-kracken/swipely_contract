@@ -8,7 +8,12 @@ use soroban_sdk::{symbol_short, Address, BytesN, Env};
 use super::types::{ChainId, MessageStatus};
 
 /// Emitted when a new message is submitted.
-pub fn emit_message_sent(env: &Env, message_id: &BytesN<32>, sender: &Address, dest_chain: &ChainId) {
+pub fn emit_message_sent(
+    env: &Env,
+    message_id: &BytesN<32>,
+    sender: &Address,
+    dest_chain: &ChainId,
+) {
     env.events().publish(
         (symbol_short!("msg_sent"), sender.clone()),
         (message_id.clone(), dest_chain.clone()),
@@ -58,14 +63,11 @@ pub fn emit_state_proof_verified(env: &Env, chain_id: &ChainId, block_number: u6
 
 /// Emitted when a batch relay completes.
 pub fn emit_batch_relayed(env: &Env, success_count: u32, failure_count: u32) {
-    env.events().publish(
-        (symbol_short!("batch"),),
-        (success_count, failure_count),
-    );
+    env.events()
+        .publish((symbol_short!("batch"),), (success_count, failure_count));
 }
 
 /// Emitted when expired messages are cleaned up.
 pub fn emit_messages_cleaned(env: &Env, count: u32) {
-    env.events()
-        .publish((symbol_short!("cleaned"),), count);
+    env.events().publish((symbol_short!("cleaned"),), count);
 }

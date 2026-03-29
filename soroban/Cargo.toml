@@ -6,13 +6,14 @@ description = "Soroban smart contracts for Stellar Bridge Watch on-chain monitor
 license = "MIT"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 testutils = ["soroban-sdk/testutils"]
 
 [dependencies]
 soroban-sdk = { version = "21.7.1" }
+soroban-sdk-macros = "=26.0.0"
 
 [dev-dependencies]
 soroban-sdk = { version = "21.7.1", features = ["testutils"] }

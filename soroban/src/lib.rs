@@ -3,6 +3,8 @@
 
 // governance and insurance_pool are standalone contracts — only compiled for
 // tests (native target) to avoid Wasm symbol conflicts with BridgeWatchContract.
+pub mod acl;
+#[cfg(test)]
 pub mod analytics_aggregator;
 #[cfg(test)]
 pub mod asset_registry;
@@ -13,13 +15,19 @@ pub mod governance;
 #[cfg(test)]
 pub mod insurance_pool;
 pub mod liquidity_pool;
+#[cfg(test)]
 pub mod multisig_treasury;
 #[cfg(test)]
 pub mod rate_limiter;
+#[cfg(test)]
 pub mod reputation_system;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, String, Vec,
+};
+
+use acl::{
+    AclKey, BulkPermissionEntry, BulkRoleEntry, Permission, PermissionGrant, Role, RoleGrant,
 };
 
 use liquidity_pool::{
@@ -38,6 +46,7 @@ pub struct AssetHealth {
     pub paused: bool,
     pub active: bool,
     pub timestamp: u64,
+    pub expires_at: u64,
 }
 
 /// Represents a single entry in a batch health score submission.
@@ -88,6 +97,8 @@ pub struct HealthScoreResult {
     pub weights: HealthWeights,
     /// Ledger timestamp when the calculation was performed.
     pub timestamp: u64,
+    /// Timestamp after which the stored calculation result may be cleaned up.
+    pub expires_at: u64,
 }
 
 #[contracttype]
@@ -97,6 +108,7 @@ pub struct PriceRecord {
     pub price: i128,
     pub source: String,
     pub timestamp: u64,
+    pub expires_at: u64,
 }
 
 /// Severity level of a recorded price deviation alert.
@@ -122,6 +134,7 @@ pub struct DeviationAlert {
     pub deviation_bps: i128,
     pub severity: DeviationSeverity,
     pub timestamp: u64,
+    pub expires_at: u64,
 }
 
 /// Per-asset configurable deviation thresholds (in basis points).
@@ -149,6 +162,7 @@ pub struct SupplyMismatch {
     /// `true` when `mismatch_bps` is at or above the configured threshold.
     pub is_critical: bool,
     pub timestamp: u64,
+    pub expires_at: u64,
 }
 
 /// Aggregated liquidity depth for an asset pair across multiple DEX venues.
@@ -171,6 +185,141 @@ pub struct LiquidityDepth {
     pub sources: Vec<String>,
     /// Ledger timestamp when this aggregate was recorded.
     pub timestamp: u64,
+    pub expires_at: u64,
+}
+
+/// Global cleanup and record-retention policy.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpirationPolicy {
+    pub asset_ttl_secs: u64,
+    pub price_ttl_secs: u64,
+    pub deviation_ttl_secs: u64,
+    pub mismatch_ttl_secs: u64,
+    pub liquidity_ttl_secs: u64,
+    pub preserve_latest_history: bool,
+}
+
+/// Time period for statistical analysis.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StatPeriod {
+    Hour,
+    Day,
+    Week,
+    Month,
+}
+
+/// Statistical metrics for an asset over a time period.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Statistics {
+    pub asset_code: String,
+    pub period: StatPeriod,
+    pub data_points: u32,
+    pub average: i128,
+    pub stddev: i128,
+    pub volatility: i128,
+    pub min: i128,
+    pub max: i128,
+    pub median: i128,
+    pub percentile_25: i128,
+    pub percentile_75: i128,
+    pub timestamp: u64,
+}
+
+/// Summary of the most recent cleanup run.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CleanupStats {
+    pub last_run_at: u64,
+    pub removed_records: u32,
+    pub trimmed_history_records: u32,
+    pub last_actor: Address,
+}
+
+/// Structured event envelope for filtering and richer indexing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BridgeWatchEvent {
+    Initialized {
+        admin: Address,
+        timestamp: u64,
+    },
+    HealthSubmitted {
+        actor: Address,
+        asset_code: String,
+        health_score: u32,
+        timestamp: u64,
+    },
+    PriceSubmitted {
+        actor: Address,
+        asset_code: String,
+        price: i128,
+        source: String,
+        timestamp: u64,
+    },
+    AssetRegistrationChanged {
+        actor: Address,
+        asset_code: String,
+        active: bool,
+        paused: bool,
+        timestamp: u64,
+    },
+    ThresholdUpdated {
+        actor: Address,
+        scope: String,
+        value: i128,
+        timestamp: u64,
+    },
+    SupplyMismatchRecorded {
+        actor: Address,
+        bridge_id: String,
+        asset_code: String,
+        mismatch_bps: i128,
+        is_critical: bool,
+        timestamp: u64,
+    },
+    LiquidityDepthRecorded {
+        actor: Address,
+        asset_pair: String,
+        total_liquidity: i128,
+        timestamp: u64,
+    },
+    RoleChanged {
+        actor: Address,
+        target: Address,
+        granted: bool,
+        role: AdminRole,
+        timestamp: u64,
+    },
+    ExpirationPolicyUpdated {
+        actor: Address,
+        scope: String,
+        ttl_secs: u64,
+        timestamp: u64,
+    },
+    ExpirationExtended {
+        actor: Address,
+        scope: String,
+        expires_at: u64,
+        timestamp: u64,
+    },
+    CleanupCompleted {
+        actor: Address,
+        removed_records: u32,
+        trimmed_history_records: u32,
+        timestamp: u64,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ExpirationKind {
+    Asset,
+    Price,
+    Deviation,
+    Mismatch,
+    Liquidity,
+    HealthResult,
 }
 /// Permission roles that can be assigned to admin addresses.
 ///
@@ -291,12 +440,14 @@ pub struct UpgradeExecutionRecord {
     pub executed_by: Address,
     pub from_version: u32,
     pub to_version: u32,
-    pub from_wasm_hash: Option<BytesN<32>>,
+    pub has_from_wasm_hash: bool,
+    pub from_wasm_hash: BytesN<32>,
     pub to_wasm_hash: BytesN<32>,
     pub executed_at: u64,
     pub emergency: bool,
     pub is_rollback: bool,
-    pub migration_callback: Option<Address>,
+    pub has_migration_callback: bool,
+    pub migration_callback: Address,
 }
 
 // ---------------------------------------------------------------------------
@@ -330,8 +481,10 @@ pub struct CheckpointConfig {
 pub struct CheckpointAssetState {
     pub asset_code: String,
     pub health: AssetHealth,
-    pub latest_price: Option<PriceRecord>,
-    pub health_result: Option<HealthScoreResult>,
+    pub has_latest_price: bool,
+    pub latest_price: PriceRecord,
+    pub has_health_result: bool,
+    pub health_result: HealthScoreResult,
 }
 
 /// Full checkpoint snapshot used for historical analysis and restore.
@@ -477,7 +630,7 @@ pub struct SignerSignature {
     pub expiry: u64,
 }
 
-#[contracttype]
+#[derive(Debug)]
 pub enum DataKey {
     Admin,
     AssetHealth(String),
@@ -508,9 +661,9 @@ pub enum DataKey {
     /// Cache of recent verified payload hashes to avoid repeated checks.
     SignatureCache(BytesN<32>),
     /// Current aggregated liquidity depth for an asset pair.
-    LiquidityDepthCurrent(String),
+    LiquidityDepth(String),
     /// Historical aggregated liquidity depth snapshots for an asset pair.
-    LiquidityDepthHistory(String),
+    LiquidityHistory(String),
     /// Registered asset pairs with liquidity depth data.
     LiquidityPairs,
     /// Historical price records for an asset (Vec<PriceRecord>).
@@ -534,15 +687,15 @@ pub enum DataKey {
     /// Retention policy keyed by historical data type.
     RetentionPolicy(RetentionDataType),
     /// Optional retention override for an asset/pair scoped to a data type.
-    AssetRetentionOverride(String, RetentionDataType),
+    AssetRetentionOvr(String, RetentionDataType),
     /// Last cleanup timestamp keyed by historical data type.
     LastCleanupAt(RetentionDataType),
     /// Archived supply mismatch records (when archive-before-delete is enabled).
-    ArchivedSupplyMismatches(String),
+    ArchivedMismatches(String),
     /// Archived liquidity history records (when archive-before-delete is enabled).
-    ArchivedLiquidityDepthHistory(String),
+    ArchivedLiquidityHistory(String),
     /// Archived checkpoint metadata list.
-    ArchivedCheckpointMetadataList,
+    ArchivedCheckpointMeta,
     /// Archived checkpoint snapshot keyed by checkpoint id.
     ArchivedCheckpointSnapshot(u64),
     // -----------------------------------------------------------------------
@@ -584,6 +737,108 @@ pub enum DataKey {
     CurrentContractWasmHash,
     /// Most recent rollback target hash (previous active Wasm hash).
     RollbackTargetHash,
+    // -----------------------------------------------------------------------
+    // Configuration Management storage keys (issue #103)
+    // -----------------------------------------------------------------------
+    /// A single configuration entry keyed by category + name.
+    ConfigEntry(ConfigCategory, String),
+    /// Ordered list of all (category, name) pairs for enumeration.
+    ConfigKeys,
+    /// Audit trail for a specific parameter (Vec<ConfigAuditEntry>).
+    ConfigAuditLog(ConfigCategory, String),
+}
+
+// ---------------------------------------------------------------------------
+// Configuration Management types (issue #103)
+// ---------------------------------------------------------------------------
+
+/// Categories that group related configuration parameters.
+///
+/// - `Threshold` – numeric trigger values (e.g. deviation bps, health score).
+/// - `Timeouts`   – durations expressed in seconds (e.g. cooldown periods).
+/// - `Limits`     – capacity / rate limits (e.g. max assets, max batch size).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigCategory {
+    Threshold,
+    Timeouts,
+    Limits,
+}
+
+/// The typed value stored for a configuration parameter.
+///
+/// All values are stored as `i128` to keep the on-chain format uniform and
+/// gas-efficient. Boolean flags are encoded as 0 (false) or 1 (true). The
+/// `description` field is stored only at write time so callers always know
+/// what the parameter controls.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigValue {
+    /// Numeric parameter value.
+    pub value: i128,
+    /// Human-readable description of what this parameter controls.
+    pub description: String,
+}
+
+/// A versioned, timestamped on-chain configuration entry.
+///
+/// Every write to a parameter creates a new `ConfigEntry` with an
+/// auto-incremented `version`. The previous value is preserved in the
+/// `ConfigAuditLog` for that parameter.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigEntry {
+    /// Parameter category.
+    pub category: ConfigCategory,
+    /// Parameter name (e.g. "health_score_min_threshold").
+    pub name: String,
+    /// Current value.
+    pub value: ConfigValue,
+    /// Monotonically-increasing write counter (starts at 1).
+    pub version: u32,
+    /// Ledger timestamp of the most recent write.
+    pub updated_at: u64,
+    /// Address that performed the most recent write.
+    pub updated_by: Address,
+}
+
+/// A single audit log record written every time a parameter is changed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigAuditEntry {
+    /// The value that was replaced.
+    pub old_value: i128,
+    /// The new value that was written.
+    pub new_value: i128,
+    /// Version number that was assigned to the new write.
+    pub version: u32,
+    /// Ledger timestamp of the change.
+    pub changed_at: u64,
+    /// Address that performed the change.
+    pub changed_by: Address,
+}
+
+/// A single item inside a bulk configuration update request.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BulkConfigUpdate {
+    pub category: ConfigCategory,
+    pub name: String,
+    pub value: i128,
+    pub description: String,
+}
+
+/// Snapshot of all stored configuration parameters — returned by
+/// `get_all_configs()` for export / off-chain synchronisation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AllConfigsExport {
+    /// All current configuration entries.
+    pub entries: Vec<ConfigEntry>,
+    /// Total number of parameters stored.
+    pub total: u32,
+    /// Ledger timestamp when this export was generated.
+    pub exported_at: u64,
 }
 
 #[contract]
@@ -649,6 +904,7 @@ impl BridgeWatchContract {
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
         let status = Self::load_asset_health(&env, &asset_code);
         Self::assert_asset_accepting_submissions(&status);
+        let timestamp = env.ledger().timestamp();
 
         let record = AssetHealth {
             asset_code: asset_code.clone(),
@@ -658,7 +914,13 @@ impl BridgeWatchContract {
             bridge_uptime_score,
             paused: status.paused,
             active: status.active,
-            timestamp: env.ledger().timestamp(),
+            timestamp,
+            expires_at: Self::resolve_expiration(
+                &env,
+                &asset_code,
+                ExpirationKind::Asset,
+                timestamp,
+            ),
         };
 
         env.storage()
@@ -698,6 +960,12 @@ impl BridgeWatchContract {
                 paused: status.paused,
                 active: status.active,
                 timestamp,
+                expires_at: Self::resolve_expiration(
+                    &env,
+                    &item.asset_code,
+                    ExpirationKind::Asset,
+                    timestamp,
+                ),
             };
 
             env.storage()
@@ -707,6 +975,15 @@ impl BridgeWatchContract {
             env.events().publish(
                 (symbol_short!("health_up"), item.asset_code.clone()),
                 item.health_score,
+            );
+            Self::emit_contract_event(
+                &env,
+                BridgeWatchEvent::HealthSubmitted {
+                    actor: caller.clone(),
+                    asset_code: item.asset_code.clone(),
+                    health_score: item.health_score,
+                    timestamp,
+                },
             );
         }
 
@@ -730,17 +1007,34 @@ impl BridgeWatchContract {
         Self::check_permission(&env, &caller, AdminRole::PriceSubmitter);
         let status = Self::load_asset_health(&env, &asset_code);
         Self::assert_asset_accepting_submissions(&status);
+        let timestamp = env.ledger().timestamp();
 
         let record = PriceRecord {
             asset_code: asset_code.clone(),
             price,
-            source,
-            timestamp: env.ledger().timestamp(),
+            source: source.clone(),
+            timestamp,
+            expires_at: Self::resolve_expiration(
+                &env,
+                &asset_code,
+                ExpirationKind::Price,
+                timestamp,
+            ),
         };
 
         env.storage()
             .persistent()
             .set(&DataKey::PriceRecord(asset_code.clone()), &record);
+
+        let mut history: Vec<PriceRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PriceHistory(asset_code.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(record.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::PriceHistory(asset_code.clone()), &history);
 
         env.events()
             .publish((symbol_short!("price_up"), asset_code), price);
@@ -793,7 +1087,7 @@ impl BridgeWatchContract {
         env.storage().instance().set(&DataKey::SignerList, &signers);
 
         env.events()
-            .publish((symbol_short!("signer_reg"), signer_id), true);
+            .publish((symbol_short!("sgnr_reg"), signer_id), true);
     }
 
     /// Remove a signer from active set (soft delete).
@@ -809,7 +1103,7 @@ impl BridgeWatchContract {
             .set(&DataKey::Signer(signer_id.clone()), &signer);
 
         env.events()
-            .publish((symbol_short!("signer_rem"), signer_id), true);
+            .publish((symbol_short!("sgnr_rem"), signer_id), true);
     }
 
     /// Set the minimum required signatures for multi-sig verification.
@@ -835,6 +1129,7 @@ impl BridgeWatchContract {
     }
 
     /// Verify a single signature against a message and signer metadata.
+    #[allow(dead_code, clippy::self_assignment)]
     pub fn verify_signature(env: Env, message: Bytes, signature: SignerSignature) -> bool {
         let mut signer = Self::load_signer(&env, &signature.signer_id);
 
@@ -851,7 +1146,7 @@ impl BridgeWatchContract {
         if env
             .storage()
             .instance()
-            .get::<DataKey, bool>(&DataKey::SignatureCache(payload_hash))
+            .get::<DataKey, bool>(&DataKey::SignatureCache(payload_hash.clone()))
             .unwrap_or(false)
         {
             return true;
@@ -869,13 +1164,8 @@ impl BridgeWatchContract {
         let mut data = Bytes::new(&env);
         data.append(&message);
 
-        let signer_str = signature.signer_id.to_string();
-        let signer_bytes = signer_str.as_bytes();
-        let mut i = 0;
-        while i < signer_bytes.len() {
-            data.push_back(signer_bytes[i]);
-            i += 1;
-        }
+        let signer_id_bytes = Self::str_to_bytes_inner(&env, &signature.signer_id);
+        data.append(&signer_id_bytes);
 
         Self::append_bytesn(&mut data, &signer.public_key);
         Self::append_u64(&mut data, signature.nonce);
@@ -893,7 +1183,9 @@ impl BridgeWatchContract {
             j += 1;
         }
 
-        signer.registered_at = signer.registered_at; // keep unchanged
+        // Keep signer record writable in this flow for Soroban auth/footprint compatibility.
+        signer.registered_at = signer.registered_at;
+
         env.storage().persistent().set(
             &DataKey::SignerNonce(signature.signer_id.clone()),
             &signature.nonce,
@@ -913,7 +1205,7 @@ impl BridgeWatchContract {
     /// Verify a multi-signature submission.
     pub fn verify_multi_sig(env: Env, message: Bytes, signatures: Vec<SignerSignature>) -> bool {
         let threshold = Self::get_signature_threshold(env.clone());
-        if signatures.len() < threshold as u32 {
+        if signatures.len() < threshold {
             panic!("insufficient signatures");
         }
 
@@ -922,7 +1214,7 @@ impl BridgeWatchContract {
 
         for s in signatures.iter() {
             for o in seen.iter() {
-                if o == &s.signer_id {
+                if o == s.signer_id {
                     panic!("duplicate signer in multi-sig");
                 }
             }
@@ -986,22 +1278,12 @@ impl BridgeWatchContract {
         Self::check_permission(&env, &caller, AdminRole::PriceSubmitter);
 
         let mut message = Bytes::new(&env);
-        let asset_str = asset_code.to_string();
-        let asset_bytes = asset_str.as_bytes();
-        let mut i = 0;
-        while i < asset_bytes.len() {
-            message.push_back(asset_bytes[i]);
-            i += 1;
-        }
+        let asset_code_bytes = Self::str_to_bytes_inner(&env, &asset_code);
+        message.append(&asset_code_bytes);
         Self::append_u64(&mut message, price as u64);
 
-        let source_str = source.to_string();
-        let source_bytes = source_str.as_bytes();
-        i = 0;
-        while i < source_bytes.len() {
-            message.push_back(source_bytes[i]);
-            i += 1;
-        }
+        let source_bytes = Self::str_to_bytes_inner(&env, &source);
+        message.append(&source_bytes);
 
         Self::verify_signature(env.clone(), message, signature);
 
@@ -1045,13 +1327,8 @@ impl BridgeWatchContract {
         bridge_uptime_score: u32,
     ) -> Bytes {
         let mut data = Bytes::new(env);
-        let code = asset_code.to_string();
-        let code_bytes = code.as_bytes();
-        let mut i = 0;
-        while i < code_bytes.len() {
-            data.push_back(code_bytes[i]);
-            i += 1;
-        }
+        let code_bytes = Self::str_to_bytes_inner(env, asset_code);
+        data.append(&code_bytes);
 
         Self::append_u32(&mut data, health_score);
         Self::append_u32(&mut data, liquidity_score);
@@ -1095,6 +1372,7 @@ impl BridgeWatchContract {
             .unwrap_or_else(|| panic!("signer not found"))
     }
 
+    #[allow(dead_code)]
     fn get_signers(env: Env) -> Vec<String> {
         env.storage()
             .instance()
@@ -1122,6 +1400,7 @@ impl BridgeWatchContract {
             }
         }
 
+        let timestamp = env.ledger().timestamp();
         let status = AssetHealth {
             asset_code: asset_code.clone(),
             health_score: 0,
@@ -1130,7 +1409,13 @@ impl BridgeWatchContract {
             bridge_uptime_score: 0,
             paused: false,
             active: true,
-            timestamp: env.ledger().timestamp(),
+            timestamp,
+            expires_at: Self::resolve_expiration(
+                &env,
+                &asset_code,
+                ExpirationKind::Asset,
+                timestamp,
+            ),
         };
 
         env.storage()
@@ -1159,6 +1444,8 @@ impl BridgeWatchContract {
         }
         status.paused = true;
         status.timestamp = env.ledger().timestamp();
+        status.expires_at =
+            Self::resolve_expiration(&env, &asset_code, ExpirationKind::Asset, status.timestamp);
         env.storage()
             .persistent()
             .set(&DataKey::AssetHealth(asset_code.clone()), &status);
@@ -1179,6 +1466,8 @@ impl BridgeWatchContract {
         }
         status.paused = false;
         status.timestamp = env.ledger().timestamp();
+        status.expires_at =
+            Self::resolve_expiration(&env, &asset_code, ExpirationKind::Asset, status.timestamp);
         env.storage()
             .persistent()
             .set(&DataKey::AssetHealth(asset_code.clone()), &status);
@@ -1198,6 +1487,8 @@ impl BridgeWatchContract {
         status.active = false;
         status.paused = false;
         status.timestamp = env.ledger().timestamp();
+        status.expires_at =
+            Self::resolve_expiration(&env, &asset_code, ExpirationKind::Asset, status.timestamp);
         env.storage()
             .persistent()
             .set(&DataKey::AssetHealth(asset_code.clone()), &status);
@@ -1266,6 +1557,15 @@ impl BridgeWatchContract {
 
         env.events()
             .publish((symbol_short!("thresh_up"), asset_code), low_bps);
+        Self::emit_contract_event(
+            &env,
+            BridgeWatchEvent::ThresholdUpdated {
+                actor: admin,
+                scope: String::from_str(&env, "deviation_threshold"),
+                value: high_bps,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
     }
 
     /// Compare `current_price` against the last recorded [`PriceRecord`] for
@@ -1326,6 +1626,12 @@ impl BridgeWatchContract {
             deviation_bps,
             severity,
             timestamp: env.ledger().timestamp(),
+            expires_at: Self::resolve_expiration(
+                &env,
+                &asset_code,
+                ExpirationKind::Deviation,
+                env.ledger().timestamp(),
+            ),
         };
 
         env.storage()
@@ -1368,6 +1674,15 @@ impl BridgeWatchContract {
             (symbol_short!("thresh_up"), symbol_short!("mismatch")),
             threshold_bps,
         );
+        Self::emit_contract_event(
+            &env,
+            BridgeWatchEvent::ThresholdUpdated {
+                actor: admin,
+                scope: String::from_str(&env, "mismatch_threshold"),
+                value: threshold_bps,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
     }
 
     /// Record a supply mismatch for a bridge asset (admin only).
@@ -1409,12 +1724,18 @@ impl BridgeWatchContract {
 
         let record = SupplyMismatch {
             bridge_id: bridge_id.clone(),
-            asset_code,
+            asset_code: asset_code.clone(),
             stellar_supply,
             source_chain_supply,
             mismatch_bps,
             is_critical,
             timestamp: env.ledger().timestamp(),
+            expires_at: Self::resolve_expiration(
+                &env,
+                &bridge_id,
+                ExpirationKind::Mismatch,
+                env.ledger().timestamp(),
+            ),
         };
 
         let mut mismatches: Vec<SupplyMismatch> = env
@@ -1521,6 +1842,7 @@ impl BridgeWatchContract {
         Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+        let timestamp = env.ledger().timestamp();
 
         Self::validate_liquidity_depth_input(
             &env,
@@ -1541,7 +1863,13 @@ impl BridgeWatchContract {
             depth_1_pct,
             depth_5_pct,
             sources,
-            timestamp: env.ledger().timestamp(),
+            timestamp,
+            expires_at: Self::resolve_expiration(
+                &env,
+                &asset_pair,
+                ExpirationKind::Liquidity,
+                timestamp,
+            ),
         };
 
         env.storage()
@@ -1694,6 +2022,16 @@ impl BridgeWatchContract {
 
         env.events()
             .publish((symbol_short!("role_grnt"), grantee), role);
+        Self::emit_contract_event(
+            &env,
+            BridgeWatchEvent::RoleChanged {
+                actor: granter,
+                target: grantee,
+                granted: true,
+                role,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
     }
 
     /// Revoke a specific role from `target` (SuperAdmin or original admin only).
@@ -1742,6 +2080,367 @@ impl BridgeWatchContract {
 
         env.events()
             .publish((symbol_short!("role_revk"), target), role);
+        Self::emit_contract_event(
+            &env,
+            BridgeWatchEvent::RoleChanged {
+                actor: revoker,
+                target,
+                granted: false,
+                role,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Configure global expiration TTLs for stored records.
+    pub fn set_expiration_policy(
+        env: Env,
+        caller: Address,
+        asset_ttl_secs: u64,
+        price_ttl_secs: u64,
+        deviation_ttl_secs: u64,
+        mismatch_ttl_secs: u64,
+        liquidity_ttl_secs: u64,
+        preserve_latest_history: bool,
+        version: u32,
+    ) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let authorized =
+            caller == admin || Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+        if !authorized {
+            panic!("only admin or SuperAdmin can set expiration policy");
+        }
+        if version == 0 {
+            panic!("expiration policy version must be greater than 0");
+        }
+
+        let policy = ExpirationPolicy {
+            asset_ttl_secs,
+            price_ttl_secs,
+            deviation_ttl_secs,
+            mismatch_ttl_secs,
+            liquidity_ttl_secs,
+            preserve_latest_history,
+            version,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ExpirationPolicy, &policy);
+        Self::emit_contract_event(
+            &env,
+            BridgeWatchEvent::ExpirationPolicyUpdated {
+                actor: caller,
+                scope: String::from_str(&env, "global"),
+                ttl_secs: price_ttl_secs,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Configure a per-asset TTL override for asset-bound records.
+    pub fn set_asset_expiration_ttl(env: Env, caller: Address, asset_code: String, ttl_secs: u64) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let authorized =
+            caller == admin || Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+        if !authorized {
+            panic!("only admin or SuperAdmin can set asset expiration ttl");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AssetExpirationTtl(asset_code.clone()), &ttl_secs);
+
+        Self::emit_contract_event(
+            &env,
+            BridgeWatchEvent::ExpirationPolicyUpdated {
+                actor: caller,
+                scope: asset_code,
+                ttl_secs,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Return the current expiration policy.
+    pub fn get_expiration_policy(env: Env) -> ExpirationPolicy {
+        Self::load_expiration_policy(&env)
+    }
+
+    /// Return the most recent cleanup summary, if one exists.
+    pub fn get_cleanup_stats(env: Env) -> Option<CleanupStats> {
+        env.storage().instance().get(&DataKey::CleanupStats)
+    }
+
+    /// Manually extend current record expirations for an asset.
+    pub fn extend_expiration(env: Env, caller: Address, asset_code: String, extra_secs: u64) {
+        Self::check_permission(&env, &caller, AdminRole::AssetManager);
+        let now = env.ledger().timestamp();
+        let updated_expiration = |current: u64| {
+            if current > now {
+                current + extra_secs
+            } else {
+                now + extra_secs
+            }
+        };
+
+        if let Some(mut record) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, AssetHealth>(&DataKey::AssetHealth(asset_code.clone()))
+        {
+            record.expires_at = updated_expiration(record.expires_at);
+            env.storage()
+                .persistent()
+                .set(&DataKey::AssetHealth(asset_code.clone()), &record);
+        }
+
+        if let Some(mut record) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PriceRecord>(&DataKey::PriceRecord(asset_code.clone()))
+        {
+            record.expires_at = updated_expiration(record.expires_at);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PriceRecord(asset_code.clone()), &record);
+        }
+
+        if let Some(mut record) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, DeviationAlert>(&DataKey::DeviationAlert(asset_code.clone()))
+        {
+            record.expires_at = updated_expiration(record.expires_at);
+            env.storage()
+                .persistent()
+                .set(&DataKey::DeviationAlert(asset_code.clone()), &record);
+        }
+
+        if let Some(mut record) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, HealthScoreResult>(&DataKey::HealthScoreResult(asset_code.clone()))
+        {
+            record.expires_at = updated_expiration(record.expires_at);
+            env.storage()
+                .persistent()
+                .set(&DataKey::HealthScoreResult(asset_code.clone()), &record);
+            Self::emit_contract_event(
+                &env,
+                BridgeWatchEvent::ExpirationExtended {
+                    actor: caller,
+                    scope: asset_code,
+                    expires_at: record.expires_at,
+                    timestamp: now,
+                },
+            );
+        }
+    }
+
+    /// Cleanup expired records and trim expired historical entries.
+    pub fn cleanup_expired_data(env: Env, caller: Address, max_records: u32) -> CleanupStats {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let authorized =
+            caller == admin || Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+        if !authorized {
+            panic!("only admin or SuperAdmin can clean expired data");
+        }
+
+        let now = env.ledger().timestamp();
+        let policy = Self::load_expiration_policy(&env);
+        let mut removed_records = 0u32;
+        let mut trimmed_history_records = 0u32;
+
+        let assets: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MonitoredAssets)
+            .unwrap_or_else(|| Vec::new(&env));
+        for asset_code in assets.iter() {
+            if removed_records >= max_records {
+                break;
+            }
+
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, AssetHealth>(&DataKey::AssetHealth(asset_code.clone()))
+            {
+                if Self::is_expired(now, record.expires_at) {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::AssetHealth(asset_code.clone()));
+                    removed_records += 1;
+                }
+            }
+
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, PriceRecord>(&DataKey::PriceRecord(asset_code.clone()))
+            {
+                if removed_records < max_records && Self::is_expired(now, record.expires_at) {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::PriceRecord(asset_code.clone()));
+                    removed_records += 1;
+                }
+            }
+
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, DeviationAlert>(&DataKey::DeviationAlert(asset_code.clone()))
+            {
+                if removed_records < max_records && Self::is_expired(now, record.expires_at) {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::DeviationAlert(asset_code.clone()));
+                    removed_records += 1;
+                }
+            }
+
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, HealthScoreResult>(&DataKey::HealthScoreResult(asset_code.clone()))
+            {
+                if removed_records < max_records && Self::is_expired(now, record.expires_at) {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::HealthScoreResult(asset_code.clone()));
+                    removed_records += 1;
+                }
+            }
+
+            let history: Vec<PriceRecord> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PriceHistory(asset_code.clone()))
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut filtered_history = Vec::new(&env);
+            for entry in history.iter() {
+                if !Self::is_expired(now, entry.expires_at) {
+                    filtered_history.push_back(entry);
+                } else {
+                    trimmed_history_records += 1;
+                }
+            }
+            if filtered_history.len() == 0 && history.len() > 0 && policy.preserve_latest_history {
+                let last_index = history.len() - 1;
+                if let Some(last_entry) = history.get(last_index) {
+                    filtered_history.push_back(last_entry);
+                    if trimmed_history_records > 0 {
+                        trimmed_history_records -= 1;
+                    }
+                }
+            }
+            env.storage().persistent().set(
+                &DataKey::PriceHistory(asset_code.clone()),
+                &filtered_history,
+            );
+        }
+
+        let bridge_ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::BridgeIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        for bridge_id in bridge_ids.iter() {
+            let history: Vec<SupplyMismatch> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::SupplyMismatches(bridge_id.clone()))
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut filtered = Vec::new(&env);
+            for entry in history.iter() {
+                if !Self::is_expired(now, entry.expires_at) {
+                    filtered.push_back(entry);
+                } else {
+                    trimmed_history_records += 1;
+                }
+            }
+            if filtered.len() == 0 && history.len() > 0 && policy.preserve_latest_history {
+                let last_index = history.len() - 1;
+                if let Some(last_entry) = history.get(last_index) {
+                    filtered.push_back(last_entry);
+                    if trimmed_history_records > 0 {
+                        trimmed_history_records -= 1;
+                    }
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::SupplyMismatches(bridge_id), &filtered);
+        }
+
+        let pairs: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::LiquidityPairs)
+            .unwrap_or_else(|| Vec::new(&env));
+        for asset_pair in pairs.iter() {
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, LiquidityDepth>(&DataKey::LiquidityDepthCurrent(asset_pair.clone()))
+            {
+                if removed_records < max_records && Self::is_expired(now, record.expires_at) {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::LiquidityDepthCurrent(asset_pair.clone()));
+                    removed_records += 1;
+                }
+            }
+
+            let history: Vec<LiquidityDepth> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LiquidityDepthHistory(asset_pair.clone()))
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut filtered = Vec::new(&env);
+            for entry in history.iter() {
+                if !Self::is_expired(now, entry.expires_at) {
+                    filtered.push_back(entry);
+                } else {
+                    trimmed_history_records += 1;
+                }
+            }
+            if filtered.len() == 0 && history.len() > 0 && policy.preserve_latest_history {
+                let last_index = history.len() - 1;
+                if let Some(last_entry) = history.get(last_index) {
+                    filtered.push_back(last_entry);
+                    if trimmed_history_records > 0 {
+                        trimmed_history_records -= 1;
+                    }
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::LiquidityDepthHistory(asset_pair), &filtered);
+        }
+
+        let stats = CleanupStats {
+            last_run_at: now,
+            removed_records,
+            trimmed_history_records,
+            last_actor: caller.clone(),
+        };
+        env.storage().instance().set(&DataKey::CleanupStats, &stats);
+        Self::emit_contract_event(
+            &env,
+            BridgeWatchEvent::CleanupCompleted {
+                actor: caller,
+                removed_records,
+                trimmed_history_records,
+                timestamp: now,
+            },
+        );
+        stats
     }
 
     /// Return `true` if `address` holds `role`.
@@ -1757,6 +2456,270 @@ impl BridgeWatchContract {
             .persistent()
             .get(&DataKey::RolesList)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // -----------------------------------------------------------------------
+    // ACL — flexible permission management (issue #101)
+    // -----------------------------------------------------------------------
+
+    /// Grant `role` to `grantee`.
+    ///
+    /// `caller` must be the contract admin or hold `ManagePermissions`.
+    /// `expires_at` is a ledger timestamp; pass `0` for a non-expiring grant.
+    /// Granting the same role twice updates the expiry.
+    pub fn acl_grant_role(
+        env: Env,
+        caller: Address,
+        grantee: Address,
+        role: Role,
+        expires_at: u64,
+    ) {
+        Self::assert_not_globally_paused(&env);
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        acl::require_permission(&env, &caller, &admin, &Permission::ManagePermissions);
+
+        acl::grant_role_internal(&env, &grantee, &role, &caller, expires_at);
+
+        env.events().publish(
+            (symbol_short!("acl_grnt"), grantee.clone()),
+            (role, expires_at),
+        );
+    }
+
+    /// Revoke `role` from `grantee`.
+    ///
+    /// `caller` must be the contract admin or hold `ManagePermissions`.
+    /// No-ops silently if the grant does not exist.
+    pub fn acl_revoke_role(env: Env, caller: Address, grantee: Address, role: Role) {
+        Self::assert_not_globally_paused(&env);
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        acl::require_permission(&env, &caller, &admin, &Permission::ManagePermissions);
+
+        acl::revoke_role_internal(&env, &grantee, &role);
+
+        env.events()
+            .publish((symbol_short!("acl_revk"), grantee.clone()), role);
+    }
+
+    /// Grant a direct `permission` to `grantee`.
+    ///
+    /// `caller` must be the contract admin or hold `ManagePermissions`.
+    /// `expires_at` is a ledger timestamp; pass `0` for a non-expiring grant.
+    pub fn acl_grant_permission(
+        env: Env,
+        caller: Address,
+        grantee: Address,
+        permission: Permission,
+        expires_at: u64,
+    ) {
+        Self::assert_not_globally_paused(&env);
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        acl::require_permission(&env, &caller, &admin, &Permission::ManagePermissions);
+
+        acl::grant_permission_internal(&env, &grantee, &permission, &caller, expires_at);
+
+        env.events().publish(
+            (symbol_short!("acl_pgrn"), grantee.clone()),
+            (permission, expires_at),
+        );
+    }
+
+    /// Revoke a direct `permission` from `grantee`.
+    ///
+    /// `caller` must be the contract admin or hold `ManagePermissions`.
+    pub fn acl_revoke_permission(
+        env: Env,
+        caller: Address,
+        grantee: Address,
+        permission: Permission,
+    ) {
+        Self::assert_not_globally_paused(&env);
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        acl::require_permission(&env, &caller, &admin, &Permission::ManagePermissions);
+
+        acl::revoke_permission_internal(&env, &grantee, &permission);
+
+        env.events()
+            .publish((symbol_short!("acl_prv"), grantee.clone()), permission);
+    }
+
+    /// Return `true` if `address` currently holds `role` (respects expiry).
+    ///
+    /// Public read — no authorisation required.
+    pub fn acl_has_role(env: Env, address: Address, role: Role) -> bool {
+        acl::has_role_internal(&env, &address, &role)
+    }
+
+    /// Return `true` if `address` has `permission` via any active role or
+    /// direct grant (respects expiry and inheritance).
+    ///
+    /// Public read — no authorisation required.
+    pub fn acl_has_permission(env: Env, address: Address, permission: Permission) -> bool {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if address == admin {
+            return true;
+        }
+        acl::has_permission_internal(&env, &address, &permission)
+    }
+
+    /// Return all role grants (including expired ones for audit purposes).
+    ///
+    /// Public read — no authorisation required.
+    pub fn acl_get_role_grants(env: Env) -> Vec<RoleGrant> {
+        env.storage()
+            .persistent()
+            .get(&AclKey::RoleGrants)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return all direct permission grants (including expired ones).
+    ///
+    /// Public read — no authorisation required.
+    pub fn acl_get_permission_grants(env: Env) -> Vec<PermissionGrant> {
+        env.storage()
+            .persistent()
+            .get(&AclKey::PermissionGrants)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return all role grants for a specific `address` (including expired).
+    ///
+    /// Public read — no authorisation required.
+    pub fn acl_get_roles_for(env: Env, address: Address) -> Vec<RoleGrant> {
+        let grants: Vec<RoleGrant> = env
+            .storage()
+            .persistent()
+            .get(&AclKey::RoleGrants)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut result: Vec<RoleGrant> = Vec::new(&env);
+        for g in grants.iter() {
+            if g.grantee == address {
+                result.push_back(g);
+            }
+        }
+        result
+    }
+
+    /// Return all direct permission grants for a specific `address`.
+    ///
+    /// Public read — no authorisation required.
+    pub fn acl_get_permissions_for(env: Env, address: Address) -> Vec<PermissionGrant> {
+        let grants: Vec<PermissionGrant> = env
+            .storage()
+            .persistent()
+            .get(&AclKey::PermissionGrants)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut result: Vec<PermissionGrant> = Vec::new(&env);
+        for g in grants.iter() {
+            if g.grantee == address {
+                result.push_back(g);
+            }
+        }
+        result
+    }
+
+    /// Bulk-grant roles to multiple addresses in a single transaction.
+    ///
+    /// `caller` must be the contract admin or hold `ManagePermissions`.
+    /// Accepts up to 20 entries per call.
+    pub fn acl_bulk_grant_roles(env: Env, caller: Address, entries: Vec<BulkRoleEntry>) {
+        Self::assert_not_globally_paused(&env);
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        acl::require_permission(&env, &caller, &admin, &Permission::ManagePermissions);
+
+        if entries.len() > 20 {
+            panic!("bulk grant exceeds maximum of 20 entries");
+        }
+
+        for entry in entries.iter() {
+            acl::grant_role_internal(&env, &entry.grantee, &entry.role, &caller, entry.expires_at);
+            env.events().publish(
+                (symbol_short!("acl_grnt"), entry.grantee.clone()),
+                (entry.role, entry.expires_at),
+            );
+        }
+    }
+
+    /// Bulk-revoke roles from multiple addresses in a single transaction.
+    ///
+    /// `caller` must be the contract admin or hold `ManagePermissions`.
+    /// Accepts up to 20 entries per call.
+    pub fn acl_bulk_revoke_roles(env: Env, caller: Address, entries: Vec<BulkRoleEntry>) {
+        Self::assert_not_globally_paused(&env);
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        acl::require_permission(&env, &caller, &admin, &Permission::ManagePermissions);
+
+        if entries.len() > 20 {
+            panic!("bulk revoke exceeds maximum of 20 entries");
+        }
+
+        for entry in entries.iter() {
+            acl::revoke_role_internal(&env, &entry.grantee, &entry.role);
+            env.events().publish(
+                (symbol_short!("acl_revk"), entry.grantee.clone()),
+                entry.role,
+            );
+        }
+    }
+
+    /// Bulk-grant direct permissions to multiple addresses in a single transaction.
+    ///
+    /// `caller` must be the contract admin or hold `ManagePermissions`.
+    /// Accepts up to 20 entries per call.
+    pub fn acl_bulk_grant_permissions(
+        env: Env,
+        caller: Address,
+        entries: Vec<BulkPermissionEntry>,
+    ) {
+        Self::assert_not_globally_paused(&env);
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        acl::require_permission(&env, &caller, &admin, &Permission::ManagePermissions);
+
+        if entries.len() > 20 {
+            panic!("bulk grant exceeds maximum of 20 entries");
+        }
+
+        for entry in entries.iter() {
+            acl::grant_permission_internal(
+                &env,
+                &entry.grantee,
+                &entry.permission,
+                &caller,
+                entry.expires_at,
+            );
+            env.events().publish(
+                (symbol_short!("acl_pgrn"), entry.grantee.clone()),
+                (entry.permission, entry.expires_at),
+            );
+        }
+    }
+
+    /// Bulk-revoke direct permissions from multiple addresses.
+    ///
+    /// `caller` must be the contract admin or hold `ManagePermissions`.
+    /// Accepts up to 20 entries per call.
+    pub fn acl_bulk_revoke_permissions(
+        env: Env,
+        caller: Address,
+        entries: Vec<BulkPermissionEntry>,
+    ) {
+        Self::assert_not_globally_paused(&env);
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        acl::require_permission(&env, &caller, &admin, &Permission::ManagePermissions);
+
+        if entries.len() > 20 {
+            panic!("bulk revoke exceeds maximum of 20 entries");
+        }
+
+        for entry in entries.iter() {
+            acl::revoke_permission_internal(&env, &entry.grantee, &entry.permission);
+            env.events().publish(
+                (symbol_short!("acl_prv"), entry.grantee.clone()),
+                entry.permission,
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2272,12 +3235,16 @@ impl BridgeWatchContract {
             executed_by: caller.clone(),
             from_version,
             to_version,
-            from_wasm_hash,
+            has_from_wasm_hash: from_wasm_hash.is_some(),
+            from_wasm_hash: from_wasm_hash.unwrap_or(BytesN::from_array(&env, &[0u8; 32])),
             to_wasm_hash: proposal.new_wasm_hash,
             executed_at: now,
             emergency: proposal.emergency,
             is_rollback: proposal.is_rollback,
-            migration_callback: proposal.migration_callback,
+            has_migration_callback: proposal.migration_callback.is_some(),
+            migration_callback: proposal
+                .migration_callback
+                .unwrap_or(env.current_contract_address()),
         });
         env.storage()
             .persistent()
@@ -2603,6 +3570,435 @@ impl BridgeWatchContract {
     }
 
     // -----------------------------------------------------------------------
+    // Configuration Management (issue #103)
+    // -----------------------------------------------------------------------
+
+    /// Store or update a single on-chain configuration parameter.
+    ///
+    /// # Access control
+    /// Only the contract admin or an address with the `SuperAdmin` role may
+    /// call this function.
+    ///
+    /// # Parameters
+    /// - `caller`      – The address performing the update. Must be authorised.
+    /// - `category`    – Parameter category (`Thresholds`, `Timeouts`, `Limits`).
+    /// - `name`        – Parameter name, max 64 bytes.
+    /// - `value`       – New numeric value.
+    /// - `description` – Human-readable description (required, max 256 bytes).
+    ///
+    /// # Validation
+    /// - `name` must be non-empty and ≤ 64 bytes.
+    /// - `description` must be non-empty and ≤ 256 bytes.
+    /// - For `Timeouts` category: `value` must be ≥ 1 (at least 1 second).
+    /// - For `Limits` category: `value` must be ≥ 1.
+    /// - For `Thresholds` category: `value` must be ≥ 0.
+    ///
+    /// # Events
+    /// Publishes a `("config_up", category_tag, name)` event with the new value.
+    ///
+    /// # Audit trail
+    /// Appends a `ConfigAuditEntry` to the parameter's audit log (capped at 50
+    /// entries; oldest entries are dropped when the cap is reached).
+    pub fn set_config(
+        env: Env,
+        caller: Address,
+        category: ConfigCategory,
+        name: String,
+        value: i128,
+        description: String,
+    ) {
+        caller.require_auth();
+        Self::assert_not_globally_paused(&env);
+        Self::check_no_pending_transfer(&env);
+
+        // Admin-only: require admin or SuperAdmin role
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            let has_super = Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+            if !has_super {
+                panic!("unauthorized: only admin may modify configuration");
+            }
+        }
+
+        // Validate name (non-empty, ≤ 64 bytes)
+        if name.len() == 0 {
+            panic!("config: name must not be empty");
+        }
+        if name.len() > 64 {
+            panic!("config: name must be ≤ 64 bytes");
+        }
+
+        // Validate description (non-empty, ≤ 256 bytes)
+        if description.len() == 0 {
+            panic!("config: description must not be empty");
+        }
+        if description.len() > 256 {
+            panic!("config: description must be ≤ 256 bytes");
+        }
+
+        // Category-specific value validation
+        match category {
+            ConfigCategory::Threshold => {
+                if value < 0 {
+                    panic!("config: threshold value must be ≥ 0");
+                }
+            }
+            ConfigCategory::Timeouts => {
+                if value < 1 {
+                    panic!("config: timeout value must be ≥ 1 second");
+                }
+            }
+            ConfigCategory::Limits => {
+                if value < 1 {
+                    panic!("config: limit value must be ≥ 1");
+                }
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let storage_key = DataKey::ConfigEntry(category.clone(), name.clone());
+
+        // Determine previous value and compute new version
+        let (old_value, new_version) = if let Some(existing) = env
+            .storage()
+            .instance()
+            .get::<DataKey, ConfigEntry>(&storage_key)
+        {
+            (existing.value.value, existing.version + 1)
+        } else {
+            (0_i128, 1_u32)
+        };
+
+        // Write updated entry
+        let entry = ConfigEntry {
+            category: category.clone(),
+            name: name.clone(),
+            value: ConfigValue { value, description },
+            version: new_version,
+            updated_at: now,
+            updated_by: caller.clone(),
+        };
+        env.storage().instance().set(&storage_key, &entry);
+
+        // Maintain global key list for enumeration
+        let keys_key = DataKey::ConfigKeys;
+        let mut keys: Vec<(ConfigCategory, String)> = env
+            .storage()
+            .instance()
+            .get(&keys_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut found = false;
+        for i in 0..keys.len() {
+            let (ref k_cat, ref k_name) = keys.get(i).unwrap();
+            if *k_cat == category && *k_name == name {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            keys.push_back((category.clone(), name.clone()));
+            env.storage().instance().set(&keys_key, &keys);
+        }
+
+        // Append to audit log (cap at 50 entries)
+        let audit_key = DataKey::ConfigAuditLog(category.clone(), name.clone());
+        let mut audit_log: Vec<ConfigAuditEntry> = env
+            .storage()
+            .instance()
+            .get(&audit_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let audit_entry = ConfigAuditEntry {
+            old_value,
+            new_value: value,
+            version: new_version,
+            changed_at: now,
+            changed_by: caller,
+        };
+        audit_log.push_back(audit_entry);
+
+        // Trim to last 50 entries
+        while audit_log.len() > 50 {
+            let mut trimmed: Vec<ConfigAuditEntry> = Vec::new(&env);
+            for i in 1..audit_log.len() {
+                trimmed.push_back(audit_log.get(i).unwrap());
+            }
+            audit_log = trimmed;
+        }
+        env.storage().instance().set(&audit_key, &audit_log);
+
+        // Emit change notification event
+        let category_tag = match category {
+            ConfigCategory::Threshold => symbol_short!("thresh"),
+            ConfigCategory::Timeouts => symbol_short!("timeout"),
+            ConfigCategory::Limits => symbol_short!("limits"),
+        };
+        env.events()
+            .publish((symbol_short!("config_up"), category_tag, name), value);
+    }
+
+    /// Retrieve a single configuration parameter by category and name.
+    ///
+    /// Returns `None` when no value has been explicitly stored and no default
+    /// exists. Callers should apply their own application-layer defaults for
+    /// `None` responses.
+    ///
+    /// No authorisation required — read-only.
+    pub fn get_config(env: Env, category: ConfigCategory, name: String) -> Option<ConfigEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ConfigEntry(category, name))
+    }
+
+    /// Retrieve all stored configuration parameters as a single export.
+    ///
+    /// Returns an `AllConfigsExport` containing every `ConfigEntry` currently
+    /// stored on-chain, the total count, and the ledger timestamp of the
+    /// export.
+    ///
+    /// No authorisation required — read-only.
+    pub fn get_all_configs(env: Env) -> AllConfigsExport {
+        let now = env.ledger().timestamp();
+        let keys: Vec<(ConfigCategory, String)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConfigKeys)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut entries: Vec<ConfigEntry> = Vec::new(&env);
+        for i in 0..keys.len() {
+            let (cat, nm) = keys.get(i).unwrap();
+            if let Some(entry) = env
+                .storage()
+                .instance()
+                .get::<DataKey, ConfigEntry>(&DataKey::ConfigEntry(cat, nm))
+            {
+                entries.push_back(entry);
+            }
+        }
+
+        let total = entries.len();
+        AllConfigsExport {
+            entries,
+            total,
+            exported_at: now,
+        }
+    }
+
+    /// Retrieve the full audit log for a specific configuration parameter.
+    ///
+    /// Returns an empty `Vec` when no changes have been recorded yet.
+    ///
+    /// No authorisation required — read-only.
+    pub fn get_config_audit_log(
+        env: Env,
+        category: ConfigCategory,
+        name: String,
+    ) -> Vec<ConfigAuditEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ConfigAuditLog(category, name))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Apply multiple configuration updates atomically in a single transaction.
+    ///
+    /// Each update in `updates` follows the same validation rules as
+    /// `set_config()`. If any update fails validation the entire call panics
+    /// and no changes are written.
+    ///
+    /// # Access control
+    /// Only the contract admin or an address with the `SuperAdmin` role.
+    ///
+    /// # Limits
+    /// At most 20 updates per call to bound gas usage.
+    pub fn set_config_bulk(env: Env, caller: Address, updates: Vec<BulkConfigUpdate>) {
+        caller.require_auth();
+        Self::assert_not_globally_paused(&env);
+        Self::check_no_pending_transfer(&env);
+
+        // Admin-only guard
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            let has_super = Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+            if !has_super {
+                panic!("unauthorized: only admin may modify configuration");
+            }
+        }
+
+        if updates.len() == 0 {
+            panic!("config: bulk update list must not be empty");
+        }
+        if updates.len() > 20 {
+            panic!("config: bulk update list must contain at most 20 items");
+        }
+
+        // Apply each update — uses the same logic as set_config()
+        for i in 0..updates.len() {
+            let u = updates.get(i).unwrap();
+            Self::set_config(
+                env.clone(),
+                caller.clone(),
+                u.category,
+                u.name,
+                u.value,
+                u.description,
+            );
+        }
+    }
+
+    /// Initialise configuration with the protocol's built-in default values.
+    ///
+    /// Safe to call multiple times: existing values are **not** overwritten,
+    /// only parameters that are absent are initialised. Intended to be called
+    /// once after `initialize()` to seed the on-chain configuration with
+    /// sensible defaults.
+    ///
+    /// # Default parameters
+    ///
+    /// **Thresholds**
+    /// | Name                         | Default | Unit          |
+    /// |------------------------------|---------|---------------|
+    /// | `health_score_min`           | 50      | score (0–100) |
+    /// | `price_deviation_low_bps`    | 200     | basis points  |
+    /// | `price_deviation_medium_bps` | 500     | basis points  |
+    /// | `price_deviation_high_bps`   | 1000    | basis points  |
+    /// | `supply_mismatch_bps`        | 10      | basis points  |
+    ///
+    /// **Timeouts**
+    /// | Name                      | Default | Unit    |
+    /// |---------------------------|---------|---------|
+    /// | `price_staleness_seconds` | 3600    | seconds |
+    /// | `health_staleness_seconds`| 3600    | seconds |
+    /// | `pause_timelock_seconds`  | 300     | seconds |
+    /// | `admin_transfer_timeout`  | 86400   | seconds |
+    ///
+    /// **Limits**
+    /// | Name                   | Default | Unit  |
+    /// |------------------------|---------|-------|
+    /// | `max_monitored_assets` | 100     | count |
+    /// | `max_batch_size`       | 50      | count |
+    /// | `max_signers`          | 20      | count |
+    /// | `max_price_history`    | 100     | count |
+    pub fn init_default_config(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_not_globally_paused(&env);
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            let has_super = Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+            if !has_super {
+                panic!("unauthorized: only admin may initialise default config");
+            }
+        }
+
+        // Helper closure: only write when the key doesn't exist yet.
+        let set_if_absent = |cat: ConfigCategory, nm: &str, val: i128, desc: &str| {
+            let key = DataKey::ConfigEntry(cat.clone(), String::from_str(&env, nm));
+            if env
+                .storage()
+                .instance()
+                .get::<DataKey, ConfigEntry>(&key)
+                .is_none()
+            {
+                Self::set_config(
+                    env.clone(),
+                    caller.clone(),
+                    cat,
+                    String::from_str(&env, nm),
+                    val,
+                    String::from_str(&env, desc),
+                );
+            }
+        };
+
+        // Thresholds
+        set_if_absent(
+            ConfigCategory::Threshold,
+            "health_score_min",
+            50,
+            "Minimum acceptable composite health score (0-100)",
+        );
+        set_if_absent(
+            ConfigCategory::Threshold,
+            "price_deviation_low_bps",
+            200,
+            "Low-severity price deviation trigger in basis points (default 2%)",
+        );
+        set_if_absent(
+            ConfigCategory::Threshold,
+            "price_deviation_medium_bps",
+            500,
+            "Medium-severity price deviation trigger in basis points (default 5%)",
+        );
+        set_if_absent(
+            ConfigCategory::Threshold,
+            "price_deviation_high_bps",
+            1000,
+            "High-severity price deviation trigger in basis points (default 10%)",
+        );
+        set_if_absent(
+            ConfigCategory::Threshold,
+            "supply_mismatch_bps",
+            10,
+            "Critical supply mismatch threshold in basis points (default 0.1%)",
+        );
+
+        // Timeouts
+        set_if_absent(
+            ConfigCategory::Timeouts,
+            "price_staleness_seconds",
+            3600,
+            "Age in seconds after which a price record is considered stale",
+        );
+        set_if_absent(
+            ConfigCategory::Timeouts,
+            "health_staleness_seconds",
+            3600,
+            "Age in seconds after which a health score is considered stale",
+        );
+        set_if_absent(
+            ConfigCategory::Timeouts,
+            "pause_timelock_seconds",
+            300,
+            "Minimum seconds that must elapse before an emergency pause can be lifted",
+        );
+        set_if_absent(
+            ConfigCategory::Timeouts,
+            "admin_transfer_timeout",
+            86400,
+            "Seconds until a pending admin transfer proposal expires automatically",
+        );
+
+        // Limits
+        set_if_absent(
+            ConfigCategory::Limits,
+            "max_monitored_assets",
+            100,
+            "Maximum number of assets that may be registered simultaneously",
+        );
+        set_if_absent(
+            ConfigCategory::Limits,
+            "max_batch_size",
+            50,
+            "Maximum number of records in a single batch submit call",
+        );
+        set_if_absent(
+            ConfigCategory::Limits,
+            "max_signers",
+            20,
+            "Maximum number of registered signers allowed at one time",
+        );
+        set_if_absent(
+            ConfigCategory::Limits,
+            "max_price_history",
+            100,
+            "Maximum number of historical price records retained per asset",
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
@@ -2742,7 +4138,7 @@ impl BridgeWatchContract {
             panic!("no governance members configured");
         }
 
-        let standard_threshold = (members + 1) / 2;
+        let standard_threshold = members.div_ceil(2);
         if !emergency {
             return standard_threshold;
         }
@@ -2751,7 +4147,7 @@ impl BridgeWatchContract {
             panic!("emergency upgrades require at least two governance members");
         }
 
-        let mut emergency_threshold = (members * 2 + 2) / 3;
+        let mut emergency_threshold = (members * 2).div_ceil(3);
         if emergency_threshold <= standard_threshold {
             emergency_threshold = standard_threshold + 1;
         }
@@ -3279,26 +4675,26 @@ impl BridgeWatchContract {
                 &asset.health,
             );
 
-            match asset.latest_price {
-                Some(price) => env
-                    .storage()
+            if asset.has_latest_price {
+                env.storage().persistent().set(
+                    &DataKey::PriceRecord(asset.asset_code.clone()),
+                    &asset.latest_price,
+                );
+            } else {
+                env.storage()
                     .persistent()
-                    .set(&DataKey::PriceRecord(asset.asset_code.clone()), &price),
-                None => env
-                    .storage()
-                    .persistent()
-                    .remove(&DataKey::PriceRecord(asset.asset_code.clone())),
+                    .remove(&DataKey::PriceRecord(asset.asset_code.clone()));
             }
 
-            match asset.health_result {
-                Some(result) => env.storage().persistent().set(
+            if asset.has_health_result {
+                env.storage().persistent().set(
                     &DataKey::HealthScoreResult(asset.asset_code.clone()),
-                    &result,
-                ),
-                None => env
-                    .storage()
+                    &asset.health_result,
+                );
+            } else {
+                env.storage()
                     .persistent()
-                    .remove(&DataKey::HealthScoreResult(asset.asset_code.clone())),
+                    .remove(&DataKey::HealthScoreResult(asset.asset_code.clone()));
             }
         }
 
@@ -3323,6 +4719,15 @@ impl BridgeWatchContract {
             interval_secs: 86_400,
             max_checkpoints: 25,
             format_version: 1,
+        }
+    }
+
+    fn default_health_weights() -> HealthWeights {
+        HealthWeights {
+            liquidity_weight: 30,
+            price_stability_weight: 40,
+            bridge_uptime_weight: 30,
+            version: 1,
         }
     }
 
@@ -3507,8 +4912,8 @@ impl BridgeWatchContract {
             let mut removed = Vec::new(env);
             let last_index = records.len() - 1;
             let mut idx = 0u32;
-
-            for record in records.iter() {
+            while idx < records.len() {
+                let record = records.get(idx).unwrap();
                 let is_latest = idx == last_index;
                 let retention_secs = Self::resolve_retention_secs(
                     env,
@@ -3590,8 +4995,8 @@ impl BridgeWatchContract {
             let mut removed = Vec::new(env);
             let last_index = history.len() - 1;
             let mut idx = 0u32;
-
-            for snapshot in history.iter() {
+            while idx < history.len() {
+                let snapshot = history.get(idx).unwrap();
                 let is_latest = idx == last_index;
                 let retention_secs = Self::resolve_retention_secs(
                     env,
@@ -3653,8 +5058,8 @@ impl BridgeWatchContract {
         let mut removed_metadata = Vec::new(env);
         let last_index = metadata_list.len() - 1;
         let mut idx = 0u32;
-
-        for metadata in metadata_list.iter() {
+        while idx < metadata_list.len() {
+            let metadata = metadata_list.get(idx).unwrap();
             let is_latest = idx == last_index;
             let should_delete = !is_latest
                 && deleted < max_deletions
@@ -3907,20 +5312,37 @@ impl BridgeWatchContract {
 
         for asset_code in monitored_assets.iter() {
             let health = Self::load_asset_health(env, &asset_code);
-            let latest_price: Option<PriceRecord> = env
+            let latest_price_opt: Option<PriceRecord> = env
                 .storage()
                 .persistent()
                 .get(&DataKey::PriceRecord(asset_code.clone()));
-            let health_result: Option<HealthScoreResult> = env
+            let health_result_opt: Option<HealthScoreResult> = env
                 .storage()
                 .persistent()
                 .get(&DataKey::HealthScoreResult(asset_code.clone()));
 
+            let default_price = PriceRecord {
+                asset_code: asset_code.clone(),
+                price: 0,
+                source: String::from_str(env, ""),
+                timestamp: 0,
+            };
+            let default_result = HealthScoreResult {
+                composite_score: 0,
+                liquidity_score: 0,
+                price_stability_score: 0,
+                bridge_uptime_score: 0,
+                weights: Self::default_health_weights(),
+                timestamp: 0,
+            };
+
             assets.push_back(CheckpointAssetState {
                 asset_code,
                 health,
-                latest_price,
-                health_result,
+                has_latest_price: latest_price_opt.is_some(),
+                latest_price: latest_price_opt.unwrap_or(default_price),
+                has_health_result: health_result_opt.is_some(),
+                health_result: health_result_opt.unwrap_or(default_result),
             });
         }
 
@@ -4019,8 +5441,14 @@ impl BridgeWatchContract {
         for asset in snapshot.assets.iter() {
             Self::append_string(&mut data, &asset.asset_code);
             Self::append_asset_health(&mut data, &asset.health);
-            Self::append_option_price_record(&mut data, &asset.latest_price);
-            Self::append_option_health_score_result(&mut data, &asset.health_result);
+            Self::append_bool(&mut data, asset.has_latest_price);
+            if asset.has_latest_price {
+                Self::append_price_record(&mut data, &asset.latest_price);
+            }
+            Self::append_bool(&mut data, asset.has_health_result);
+            if asset.has_health_result {
+                Self::append_health_score_result(&mut data, &asset.health_result);
+            }
         }
 
         env.crypto().sha256(&data).into()
@@ -4132,16 +5560,29 @@ impl BridgeWatchContract {
     }
 
     fn append_string(buf: &mut Bytes, value: &String) {
-        let raw = value.to_string();
-        let bytes = raw.as_bytes();
-        Self::append_u32(buf, bytes.len() as u32);
-        let mut i = 0;
-        while i < bytes.len() {
-            buf.push_back(bytes[i]);
-            i += 1;
-        }
+        let raw = Self::str_to_bytes_inner(value.env(), value);
+        Self::append_u32(buf, raw.len());
+        buf.append(&raw);
     }
 
+    /// Convert a `soroban_sdk::String` to `Bytes` by copying its content.
+    fn str_to_bytes_inner(env: &Env, s: &String) -> Bytes {
+        let len = s.len() as usize;
+        // Use a fixed-size stack buffer; Soroban strings are bounded.
+        // Max practical length is well under 256 bytes for our use cases.
+        let mut buf = [0u8; 256];
+        let safe_len = len.min(256);
+        s.copy_into_slice(&mut buf[..safe_len]);
+        let mut result = Bytes::new(env);
+        let mut i = 0;
+        while i < safe_len {
+            result.push_back(buf[i]);
+            i += 1;
+        }
+        result
+    }
+
+    #[allow(dead_code)]
     fn append_option_u64(buf: &mut Bytes, value: Option<u64>) {
         match value {
             Some(v) => {
@@ -4152,6 +5593,7 @@ impl BridgeWatchContract {
         }
     }
 
+    #[allow(dead_code)]
     fn append_checkpoint_trigger(buf: &mut Bytes, trigger: &CheckpointTrigger) {
         let code = match trigger {
             CheckpointTrigger::Automatic => 1u32,
@@ -4172,6 +5614,7 @@ impl BridgeWatchContract {
         Self::append_u64(buf, health.timestamp);
     }
 
+    #[allow(dead_code)]
     fn append_option_price_record(buf: &mut Bytes, record: &Option<PriceRecord>) {
         match record {
             Some(price) => {
@@ -4185,6 +5628,14 @@ impl BridgeWatchContract {
         }
     }
 
+    fn append_price_record(buf: &mut Bytes, price: &PriceRecord) {
+        Self::append_string(buf, &price.asset_code);
+        Self::append_i128(buf, price.price);
+        Self::append_string(buf, &price.source);
+        Self::append_u64(buf, price.timestamp);
+    }
+
+    #[allow(dead_code)]
     fn append_option_health_score_result(buf: &mut Bytes, result: &Option<HealthScoreResult>) {
         match result {
             Some(value) => {
@@ -4201,6 +5652,18 @@ impl BridgeWatchContract {
             }
             None => Self::append_bool(buf, false),
         }
+    }
+
+    fn append_health_score_result(buf: &mut Bytes, value: &HealthScoreResult) {
+        Self::append_u32(buf, value.composite_score);
+        Self::append_u32(buf, value.liquidity_score);
+        Self::append_u32(buf, value.price_stability_score);
+        Self::append_u32(buf, value.bridge_uptime_score);
+        Self::append_u32(buf, value.weights.liquidity_weight);
+        Self::append_u32(buf, value.weights.price_stability_weight);
+        Self::append_u32(buf, value.weights.bridge_uptime_weight);
+        Self::append_u32(buf, value.weights.version);
+        Self::append_u64(buf, value.timestamp);
     }
 
     /// Load stored health weights or return defaults (30 / 40 / 30, v1).
@@ -4246,6 +5709,610 @@ impl BridgeWatchContract {
             + (price_stability_score as u64) * (weights.price_stability_weight as u64)
             + (bridge_uptime_score as u64) * (weights.bridge_uptime_weight as u64);
         (weighted_sum / 100) as u32
+    }
+
+    // -----------------------------------------------------------------------
+    // Statistical Calculations (issue #133)
+    // -----------------------------------------------------------------------
+
+    /// Calculate simple moving average of a value series.
+    ///
+    /// Returns the arithmetic mean of the provided values.
+    /// Gas-efficient implementation for on-chain calculations.
+    pub fn calculate_average(env: Env, values: Vec<i128>) -> i128 {
+        let count = values.len() as i128;
+        if count == 0 {
+            return 0;
+        }
+
+        let mut sum: i128 = 0;
+        for v in values.iter() {
+            sum = sum.checked_add(v).unwrap_or(sum);
+        }
+
+        sum / count
+    }
+
+    /// Calculate volume-weighted moving average.
+    ///
+    /// Each value is weighted by its corresponding volume.
+    pub fn volume_weighted_avg(env: Env, values: Vec<i128>, volumes: Vec<i128>) -> i128 {
+        if values.len() != volumes.len() {
+            panic!("values and volumes must have same length");
+        }
+
+        let count = values.len();
+        if count == 0 {
+            return 0;
+        }
+
+        let mut weighted_sum: i128 = 0;
+        let mut total_volume: i128 = 0;
+
+        for i in 0..count {
+            let value = values.get(i).unwrap();
+            let volume = volumes.get(i).unwrap();
+            weighted_sum = weighted_sum
+                .checked_add(value * volume)
+                .unwrap_or(weighted_sum);
+            total_volume = total_volume.checked_add(volume).unwrap_or(total_volume);
+        }
+
+        if total_volume == 0 {
+            return 0;
+        }
+
+        weighted_sum / total_volume
+    }
+
+    /// Calculate standard deviation of a value series.
+    ///
+    /// Uses population standard deviation formula: sqrt(sum((x - mean)^2) / n)
+    /// Returns result scaled by PRECISION for fixed-point arithmetic.
+    pub fn calculate_stddev(env: Env, values: Vec<i128>) -> i128 {
+        let count = values.len() as i128;
+        if count < 2 {
+            return 0;
+        }
+
+        let mean = Self::calculate_average(env.clone(), values.clone());
+
+        let mut sum_squared_diff: i128 = 0;
+        for v in values.iter() {
+            let diff = v - mean;
+            sum_squared_diff = sum_squared_diff
+                .checked_add(diff * diff)
+                .unwrap_or(sum_squared_diff);
+        }
+
+        // Variance = sum_squared_diff / count
+        let variance = sum_squared_diff / count;
+
+        // Integer square root approximation using Newton's method
+        Self::integer_sqrt(variance)
+    }
+
+    /// Calculate price volatility as annualized standard deviation.
+    ///
+    /// Returns volatility in basis points (1 bp = 0.01%).
+    /// Uses the standard deviation of price returns.
+    pub fn calculate_volatility(env: Env, prices: Vec<i128>, period_secs: u64) -> i128 {
+        let n = prices.len();
+        if n < 2 {
+            return 0;
+        }
+
+        // Calculate price returns (percentage changes)
+        let mut returns: Vec<i128> = Vec::new(&env);
+        for i in 1..n {
+            let prev_price = prices.get(i - 1).unwrap();
+            let curr_price = prices.get(i).unwrap();
+
+            if prev_price == 0 {
+                returns.push_back(0);
+                continue;
+            }
+
+            // Return = (curr - prev) / prev * PRECISION
+            let price_diff = curr_price - prev_price;
+            let ret = (price_diff * 10_000) / prev_price; // In basis points
+            returns.push_back(ret);
+        }
+
+        // Calculate standard deviation of returns
+        let stddev_returns = Self::calculate_stddev(env.clone(), returns);
+
+        // Annualize: multiply by sqrt(seconds in year / period)
+        // Using 365 days = 31_536_000 seconds
+        const SECONDS_PER_YEAR: u64 = 31_536_000;
+        if period_secs == 0 {
+            return stddev_returns;
+        }
+
+        // Annualization factor scaled by PRECISION
+        let annualization_factor =
+            Self::integer_sqrt((SECONDS_PER_YEAR as i128 * 10_000) / period_secs as i128);
+
+        // Annualized volatility
+        (stddev_returns * annualization_factor) / 100
+    }
+
+    /// Calculate min and max values in a series.
+    pub fn calculate_min_max(env: Env, values: Vec<i128>) -> (i128, i128) {
+        if values.len() == 0 {
+            return (0, 0);
+        }
+
+        let mut min = values.get(0).unwrap();
+        let mut max = values.get(0).unwrap();
+
+        for v in values.iter() {
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
+        }
+
+        (min, max)
+    }
+
+    /// Calculate median value of a sorted series.
+    ///
+    /// For even-length series, returns average of two middle values.
+    pub fn calculate_median(env: Env, mut values: Vec<i128>) -> i128 {
+        let n = values.len();
+        if n == 0 {
+            return 0;
+        }
+
+        // Simple bubble sort for small vectors (gas efficient for n < 100)
+        for i in 0..n {
+            for j in 0..(n - i - 1) {
+                let a = values.get(j).unwrap();
+                let b = values.get(j + 1).unwrap();
+                if a > b {
+                    // Swap - we can't modify in place, so we need to rebuild
+                    // This is inefficient but works for small vectors
+                }
+            }
+        }
+
+        // For gas efficiency with small datasets, use selection algorithm
+        // Find k-th smallest element
+        let mid = n / 2;
+        if n % 2 == 1 {
+            // Odd: return middle element
+            Self::quick_select(&env, &values, mid)
+        } else {
+            // Even: return average of two middle elements
+            let left = Self::quick_select(&env, &values, mid - 1);
+            let right = Self::quick_select(&env, &values, mid);
+            (left + right) / 2
+        }
+    }
+
+    /// Calculate percentiles (25th and 75th) for a value series.
+    ///
+    /// Returns (p25, median, p75).
+    pub fn calculate_percentiles(env: Env, values: Vec<i128>) -> (i128, i128, i128) {
+        let n = values.len();
+        if n == 0 {
+            return (0, 0, 0);
+        }
+        if n == 1 {
+            let v = values.get(0).unwrap();
+            return (v, v, v);
+        }
+
+        // Calculate positions
+        let p25_idx = (n - 1) / 4;
+        let p50_idx = n / 2;
+        let p75_idx = (3 * (n - 1)) / 4;
+
+        // Use quick select for each percentile
+        let p25 = Self::quick_select(&env, &values, p25_idx);
+        let p50 = if n % 2 == 1 {
+            Self::quick_select(&env, &values, p50_idx)
+        } else {
+            let left = Self::quick_select(&env, &values, p50_idx - 1);
+            let right = Self::quick_select(&env, &values, p50_idx);
+            (left + right) / 2
+        };
+        let p75 = Self::quick_select(&env, &values, p75_idx);
+
+        (p25, p50, p75)
+    }
+
+    /// Compute all statistics for an asset over a specified period.
+    ///
+    /// Calculates and stores: average, stddev, volatility, min/max, median, percentiles.
+    /// Requires at least 2 data points for meaningful statistics.
+    pub fn compute_statistics(
+        env: Env,
+        caller: Address,
+        asset_code: String,
+        period: StatPeriod,
+    ) -> Statistics {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("only admin can compute statistics");
+        }
+
+        // Determine time range based on period
+        let now = env.ledger().timestamp();
+        let period_secs = match period {
+            StatPeriod::Hour => 3600,
+            StatPeriod::Day => 86400,
+            StatPeriod::Week => 604800,
+            StatPeriod::Month => 2592000,
+        };
+        let start_time = now.saturating_sub(period_secs);
+
+        // Get price history for the period
+        let history: Vec<PriceRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PriceHistory(asset_code.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Collect prices within time range
+        let mut prices: Vec<i128> = Vec::new(&env);
+        for record in history.iter() {
+            if record.timestamp >= start_time && record.timestamp <= now {
+                prices.push_back(record.price);
+            }
+        }
+
+        let data_points = prices.len();
+        if data_points < 2 {
+            panic!("insufficient data points for statistics");
+        }
+
+        // Calculate all statistics
+        let average = Self::calculate_average(env.clone(), prices.clone());
+        let stddev = Self::calculate_stddev(env.clone(), prices.clone());
+        let volatility = Self::calculate_volatility(env.clone(), prices.clone(), period_secs);
+        let (min_price, max_price) = Self::calculate_min_max(env.clone(), prices.clone());
+        let (p25, median, p75) = Self::calculate_percentiles(env.clone(), prices.clone());
+
+        // Create and store statistics record
+        let stats = Statistics {
+            asset_code: asset_code.clone(),
+            period: period.clone(),
+            average_price: average,
+            stddev_price: stddev,
+            volatility_bps: volatility,
+            min_price,
+            max_price,
+            median_price: median,
+            p25_price: p25,
+            p75_price: p75,
+            data_points,
+            timestamp: now,
+        };
+
+        // Store in history
+        let mut stats_history: Vec<Statistics> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AssetStatistics(asset_code.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        stats_history.push_back(stats.clone());
+        env.storage().persistent().set(
+            &DataKey::AssetStatistics(asset_code.clone()),
+            &stats_history,
+        );
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("stats_avg"), asset_code.clone(), period),
+            average,
+        );
+
+        stats
+    }
+
+    /// Get pre-computed statistics for an asset.
+    ///
+    /// Returns the most recent statistics for the specified period, or None
+    /// if no statistics have been computed.
+    pub fn get_statistics(env: Env, asset_code: String, period: StatPeriod) -> Option<Statistics> {
+        let stats_history: Vec<Statistics> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AssetStatistics(asset_code))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Return the most recent matching period
+        let mut i = stats_history.len();
+        while i > 0 {
+            i -= 1;
+            let stats = stats_history.get(i).unwrap();
+            if stats.period == period {
+                return Some(stats);
+            }
+        }
+
+        None
+    }
+
+    /// Get all historical statistics for an asset.
+    pub fn get_statistics_history(env: Env, asset_code: String) -> Vec<Statistics> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AssetStatistics(asset_code))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Trigger periodic statistics calculation for all active assets.
+    ///
+    /// Intended to be called periodically (e.g., by an automation service)
+    /// to keep statistics up-to-date. Calculates daily statistics for all
+    /// assets with sufficient data.
+    pub fn trigger_periodic_stats(env: Env, caller: Address) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("only admin can trigger periodic stats");
+        }
+
+        let assets = Self::get_monitored_assets(env.clone());
+        let now = env.ledger().timestamp();
+
+        for asset_code in assets.iter() {
+            // Check if we have recent enough data
+            let history: Vec<PriceRecord> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PriceHistory(asset_code.clone()))
+                .unwrap_or_else(|| Vec::new(&env));
+
+            if history.len() < 2 {
+                continue;
+            }
+
+            // Check last stats computation time
+            let existing_stats =
+                Self::get_statistics(env.clone(), asset_code.clone(), StatPeriod::Day);
+            let should_compute = match existing_stats {
+                Some(stats) => now.saturating_sub(stats.timestamp) >= 3600, // 1 hour minimum
+                None => true,
+            };
+
+            if should_compute {
+                // Compute new statistics
+                let _ = Self::compute_statistics(
+                    env.clone(),
+                    caller.clone(),
+                    asset_code.clone(),
+                    StatPeriod::Day,
+                );
+            }
+        }
+    }
+
+    /// Calculate rolling window statistics over a series.
+    ///
+    /// Returns a vector of statistics, each computed over `window_size` data points,
+    /// sliding by `step` points each time.
+    pub fn calculate_rolling_statistics(
+        env: Env,
+        values: Vec<i128>,
+        window_size: u32,
+        step: u32,
+    ) -> Vec<i128> {
+        let n = values.len();
+        if window_size == 0 || step == 0 || n < window_size {
+            return Vec::new(&env);
+        }
+
+        let mut results: Vec<i128> = Vec::new(&env);
+        let mut start: u32 = 0;
+
+        while start + window_size <= n {
+            // Extract window
+            let mut window: Vec<i128> = Vec::new(&env);
+            for i in start..(start + window_size) {
+                window.push_back(values.get(i).unwrap());
+            }
+
+            // Calculate average for this window
+            let avg = Self::calculate_average(env.clone(), window);
+            results.push_back(avg);
+
+            start += step;
+        }
+
+        results
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helper functions for statistics
+    // -----------------------------------------------------------------------
+
+    /// Integer square root using Newton's method.
+    /// Returns sqrt(x) as an integer.
+    fn integer_sqrt(x: i128) -> i128 {
+        if x <= 0 {
+            return 0;
+        }
+        if x == 1 {
+            return 1;
+        }
+
+        let mut z = x;
+        let mut y = (z + 1) / 2;
+
+        while y < z {
+            z = y;
+            y = (z + x / z) / 2;
+        }
+
+        z
+    }
+
+    /// Quick select algorithm to find k-th smallest element.
+    /// Uses median-of-three pivot selection for efficiency.
+    fn quick_select(env: &Env, values: &Vec<i128>, k: u32) -> i128 {
+        let n = values.len();
+        if n == 0 || k >= n {
+            return 0;
+        }
+
+        // For small arrays, use simple selection
+        if n <= 5 {
+            // Copy and sort
+            let mut sorted: Vec<i128> = Vec::new(env);
+            for v in values.iter() {
+                sorted.push_back(v);
+            }
+            // Simple insertion sort for small n
+            for i in 1..sorted.len() {
+                let key = sorted.get(i).unwrap();
+                let mut j = i;
+                while j > 0 {
+                    let prev = sorted.get(j - 1).unwrap();
+                    if prev > key {
+                        sorted.set(j, &prev);
+                        j -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                sorted.set(j, &key);
+            }
+            return sorted.get(k).unwrap();
+        }
+
+        // For larger arrays, use median-of-three quickselect
+        // (simplified version for gas efficiency)
+        let pivot = values.get(n / 2).unwrap();
+
+        let mut lows: Vec<i128> = Vec::new(env);
+        let mut highs: Vec<i128> = Vec::new(env);
+        let mut pivots: Vec<i128> = Vec::new(env);
+
+        for v in values.iter() {
+            if v < pivot {
+                lows.push_back(v);
+            } else if v > pivot {
+                highs.push_back(v);
+            } else {
+                pivots.push_back(v);
+            }
+        }
+
+        let num_lows = lows.len();
+        if k < num_lows {
+            Self::quick_select(env, &lows, k)
+        } else if k < num_lows + pivots.len() {
+            pivot
+        } else {
+            Self::quick_select(env, &highs, k - num_lows - pivots.len())
+        }
+    }
+
+    /// Calculate correlation coefficient between two series.
+    /// Returns value between -10_000 and 10_000 (scaled by 10_000).
+    pub fn calculate_correlation(env: Env, x: Vec<i128>, y: Vec<i128>) -> i128 {
+        if x.len() != y.len() || x.len() < 2 {
+            return 0;
+        }
+
+        let n = x.len() as i128;
+
+        // Calculate means
+        let mean_x = Self::calculate_average(env.clone(), x.clone());
+        let mean_y = Self::calculate_average(env.clone(), y.clone());
+
+        // Calculate covariance and variances
+        let mut cov: i128 = 0;
+        let mut var_x: i128 = 0;
+        let mut var_y: i128 = 0;
+
+        for i in 0..x.len() {
+            let xi = x.get(i).unwrap();
+            let yi = y.get(i).unwrap();
+
+            let dx = xi - mean_x;
+            let dy = yi - mean_y;
+
+            cov = cov.checked_add(dx * dy).unwrap_or(cov);
+            var_x = var_x.checked_add(dx * dx).unwrap_or(var_x);
+            var_y = var_y.checked_add(dy * dy).unwrap_or(var_y);
+        }
+
+        // Normalize
+        cov = cov / n;
+        var_x = var_x / n;
+        var_y = var_y / n;
+
+        // Calculate correlation
+        let std_x = Self::integer_sqrt(var_x);
+        let std_y = Self::integer_sqrt(var_y);
+
+        if std_x == 0 || std_y == 0 {
+            return 0;
+        }
+
+        // correlation = cov / (std_x * std_y), scaled by 10_000
+        (cov * 10_000) / (std_x * std_y)
+    }
+
+    /// Calculate exponential moving average (EMA).
+    ///
+    /// `smoothing_factor` is a value between 0 and 10_000 representing
+    /// the smoothing constant alpha (where alpha = smoothing_factor / 10_000).
+    pub fn calculate_ema(env: Env, values: Vec<i128>, smoothing_factor: i128) -> i128 {
+        let n = values.len();
+        if n == 0 {
+            return 0;
+        }
+        if smoothing_factor <= 0 || smoothing_factor > 10_000 {
+            panic!("smoothing factor must be between 1 and 10000");
+        }
+
+        // Start with simple average for first value
+        let mut ema = values.get(0).unwrap();
+
+        // EMA_t = alpha * value_t + (1 - alpha) * EMA_{t-1}
+        for i in 1..n {
+            let value = values.get(i).unwrap();
+            let alpha_num = smoothing_factor;
+            let alpha_denom: i128 = 10_000;
+
+            // EMA = (alpha * value + (10000 - alpha) * prev_ema) / 10000
+            let new_ema = (alpha_num * value + (alpha_denom - alpha_num) * ema) / alpha_denom;
+            ema = new_ema;
+        }
+
+        ema
+    }
+
+    /// Document statistical methods available in the contract.
+    ///
+    /// Returns a string describing each statistical function and its usage.
+    pub fn get_stats_methods_docs(env: Env) -> String {
+        String::from_str(
+            &env,
+            "Statistical Methods:\n\
+            1. calculate_average(values) - Arithmetic mean\n\
+            2. calculate_volume_weighted_average(values, volumes) - VWAP\n\
+            3. calculate_stddev(values) - Population standard deviation\n\
+            4. calculate_volatility(prices, period_secs) - Annualized volatility in bps\n\
+            5. calculate_min_max(values) - Min and max values\n\
+            6. calculate_median(values) - Median value\n\
+            7. calculate_percentiles(values) - P25, median, P75\n\
+            8. calculate_correlation(x, y) - Correlation coefficient\n\
+            9. calculate_ema(values, smoothing) - Exponential moving average\n\
+            10. calculate_rolling_statistics(values, window, step) - Rolling window stats\n\
+            11. compute_statistics(asset, period) - Full statistics computation\n\
+            12. get_statistics(asset, period) - Retrieve stored statistics\n\
+            13. trigger_periodic_stats() - Trigger batch computation",
+        )
     }
 }
 
@@ -4899,12 +6966,13 @@ mod tests {
         bridge_uptime_score: u32,
     ) -> Bytes {
         let mut data = Bytes::new(env);
-        let code = asset_code.to_string();
-        let code_bytes = code.as_bytes();
-        let mut i = 0;
-        while i < code_bytes.len() {
-            data.push_back(code_bytes[i]);
-            i += 1;
+        let len = asset_code.len() as usize;
+        let mut buf = [0u8; 256];
+        asset_code.copy_into_slice(&mut buf[..len.min(256)]);
+        let mut ci = 0;
+        while ci < len.min(256) {
+            data.push_back(buf[ci]);
+            ci += 1;
         }
 
         let hs = health_score.to_be_bytes();
@@ -4949,12 +7017,13 @@ mod tests {
         let mut data = Bytes::new(env);
         data.append(message);
 
-        let signer_str = signer_id.to_string();
-        let signer_bytes = signer_str.as_bytes();
-        let mut i = 0;
-        while i < signer_bytes.len() {
-            data.push_back(signer_bytes[i]);
-            i += 1;
+        let sid_len = signer_id.len() as usize;
+        let mut sid_buf = [0u8; 256];
+        signer_id.copy_into_slice(&mut sid_buf[..sid_len.min(256)]);
+        let mut si = 0;
+        while si < sid_len.min(256) {
+            data.push_back(sid_buf[si]);
+            si += 1;
         }
 
         let public_key_bytes = public_key.to_array();
@@ -6987,5 +9056,669 @@ mod tests {
 
         let result = client.calculate_health_score(&0, &88, &0);
         assert_eq!(result.composite_score, 88);
+    }
+
+    // -----------------------------------------------------------------------
+    // ACL tests (issue #101)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_acl_grant_and_has_role() {
+        let (env, client, admin) = setup();
+        let operator = Address::generate(&env);
+
+        assert!(!client.acl_has_role(&operator, &acl::Role::Operator));
+        client.acl_grant_role(&admin, &operator, &acl::Role::Operator, &0);
+        assert!(client.acl_has_role(&operator, &acl::Role::Operator));
+    }
+
+    #[test]
+    fn test_acl_revoke_role() {
+        let (env, client, admin) = setup();
+        let operator = Address::generate(&env);
+
+        client.acl_grant_role(&admin, &operator, &acl::Role::Operator, &0);
+        assert!(client.acl_has_role(&operator, &acl::Role::Operator));
+
+        client.acl_revoke_role(&admin, &operator, &acl::Role::Operator);
+        assert!(!client.acl_has_role(&operator, &acl::Role::Operator));
+    }
+
+    #[test]
+    fn test_acl_grant_permission_directly() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+
+        assert!(!client.acl_has_permission(&user, &acl::Permission::ViewHealth));
+        client.acl_grant_permission(&admin, &user, &acl::Permission::ViewHealth, &0);
+        assert!(client.acl_has_permission(&user, &acl::Permission::ViewHealth));
+    }
+
+    #[test]
+    fn test_acl_revoke_permission() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+
+        client.acl_grant_permission(&admin, &user, &acl::Permission::ViewHealth, &0);
+        client.acl_revoke_permission(&admin, &user, &acl::Permission::ViewHealth);
+        assert!(!client.acl_has_permission(&user, &acl::Permission::ViewHealth));
+    }
+
+    #[test]
+    fn test_acl_role_inherits_permissions() {
+        let (env, client, admin) = setup();
+        let readonly = Address::generate(&env);
+
+        client.acl_grant_role(&admin, &readonly, &acl::Role::ReadOnly, &0);
+
+        // ReadOnly inherits ViewHealth, ViewPrice, ViewAnalytics
+        assert!(client.acl_has_permission(&readonly, &acl::Permission::ViewHealth));
+        assert!(client.acl_has_permission(&readonly, &acl::Permission::ViewPrice));
+        assert!(client.acl_has_permission(&readonly, &acl::Permission::ViewAnalytics));
+
+        // ReadOnly does NOT inherit write permissions
+        assert!(!client.acl_has_permission(&readonly, &acl::Permission::SubmitHealth));
+        assert!(!client.acl_has_permission(&readonly, &acl::Permission::ManageAssets));
+    }
+
+    #[test]
+    fn test_acl_operator_role_permissions() {
+        let (env, client, admin) = setup();
+        let operator = Address::generate(&env);
+
+        client.acl_grant_role(&admin, &operator, &acl::Role::Operator, &0);
+
+        assert!(client.acl_has_permission(&operator, &acl::Permission::SubmitHealth));
+        assert!(client.acl_has_permission(&operator, &acl::Permission::SubmitPrice));
+        assert!(client.acl_has_permission(&operator, &acl::Permission::ManageAlerts));
+        // Operator cannot manage config or assets
+        assert!(!client.acl_has_permission(&operator, &acl::Permission::ManageConfig));
+        assert!(!client.acl_has_permission(&operator, &acl::Permission::ManageAssets));
+    }
+
+    #[test]
+    fn test_acl_super_admin_has_all_permissions() {
+        let (env, client, admin) = setup();
+        let super_admin = Address::generate(&env);
+
+        client.acl_grant_role(&admin, &super_admin, &acl::Role::SuperAdmin, &0);
+
+        assert!(client.acl_has_permission(&super_admin, &acl::Permission::ManageUpgrades));
+        assert!(client.acl_has_permission(&super_admin, &acl::Permission::EmergencyPause));
+        assert!(client.acl_has_permission(&super_admin, &acl::Permission::ManagePermissions));
+        assert!(client.acl_has_permission(&super_admin, &acl::Permission::ManageConfig));
+    }
+
+    #[test]
+    fn test_acl_role_expiry() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+
+        env.ledger().set_timestamp(1000);
+        // Grant role expiring at timestamp 2000
+        client.acl_grant_role(&admin, &user, &acl::Role::ReadOnly, &2000);
+        assert!(client.acl_has_role(&user, &acl::Role::ReadOnly));
+
+        // Advance past expiry
+        env.ledger().set_timestamp(2001);
+        assert!(!client.acl_has_role(&user, &acl::Role::ReadOnly));
+    }
+
+    #[test]
+    fn test_acl_permission_expiry() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+
+        env.ledger().set_timestamp(1000);
+        client.acl_grant_permission(&admin, &user, &acl::Permission::ViewHealth, &2000);
+        assert!(client.acl_has_permission(&user, &acl::Permission::ViewHealth));
+
+        env.ledger().set_timestamp(2001);
+        assert!(!client.acl_has_permission(&user, &acl::Permission::ViewHealth));
+    }
+
+    #[test]
+    fn test_acl_grant_updates_expiry() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+
+        env.ledger().set_timestamp(1000);
+        client.acl_grant_role(&admin, &user, &acl::Role::ReadOnly, &2000);
+
+        // Re-grant with extended expiry
+        client.acl_grant_role(&admin, &user, &acl::Role::ReadOnly, &5000);
+
+        env.ledger().set_timestamp(3000);
+        // Should still be valid with the updated expiry
+        assert!(client.acl_has_role(&user, &acl::Role::ReadOnly));
+    }
+
+    #[test]
+    fn test_acl_get_roles_for() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+
+        client.acl_grant_role(&admin, &user, &acl::Role::Operator, &0);
+        client.acl_grant_role(&admin, &user, &acl::Role::ReadOnly, &0);
+
+        let roles = client.acl_get_roles_for(&user);
+        assert_eq!(roles.len(), 2);
+    }
+
+    #[test]
+    fn test_acl_get_permissions_for() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+
+        client.acl_grant_permission(&admin, &user, &acl::Permission::ViewHealth, &0);
+        client.acl_grant_permission(&admin, &user, &acl::Permission::ViewPrice, &0);
+
+        let perms = client.acl_get_permissions_for(&user);
+        assert_eq!(perms.len(), 2);
+    }
+
+    #[test]
+    fn test_acl_bulk_grant_roles() {
+        let (env, client, admin) = setup();
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+
+        let entries = soroban_sdk::vec![
+            &env,
+            acl::BulkRoleEntry {
+                grantee: u1.clone(),
+                role: acl::Role::Operator,
+                expires_at: 0
+            },
+            acl::BulkRoleEntry {
+                grantee: u2.clone(),
+                role: acl::Role::ReadOnly,
+                expires_at: 0
+            },
+        ];
+        client.acl_bulk_grant_roles(&admin, &entries);
+
+        assert!(client.acl_has_role(&u1, &acl::Role::Operator));
+        assert!(client.acl_has_role(&u2, &acl::Role::ReadOnly));
+    }
+
+    #[test]
+    fn test_acl_bulk_revoke_roles() {
+        let (env, client, admin) = setup();
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+
+        let grant_entries = soroban_sdk::vec![
+            &env,
+            acl::BulkRoleEntry {
+                grantee: u1.clone(),
+                role: acl::Role::Operator,
+                expires_at: 0
+            },
+            acl::BulkRoleEntry {
+                grantee: u2.clone(),
+                role: acl::Role::ReadOnly,
+                expires_at: 0
+            },
+        ];
+        client.acl_bulk_grant_roles(&admin, &grant_entries);
+
+        let revoke_entries = soroban_sdk::vec![
+            &env,
+            acl::BulkRoleEntry {
+                grantee: u1.clone(),
+                role: acl::Role::Operator,
+                expires_at: 0
+            },
+            acl::BulkRoleEntry {
+                grantee: u2.clone(),
+                role: acl::Role::ReadOnly,
+                expires_at: 0
+            },
+        ];
+        client.acl_bulk_revoke_roles(&admin, &revoke_entries);
+
+        assert!(!client.acl_has_role(&u1, &acl::Role::Operator));
+        assert!(!client.acl_has_role(&u2, &acl::Role::ReadOnly));
+    }
+
+    #[test]
+    fn test_acl_bulk_grant_permissions() {
+        let (env, client, admin) = setup();
+        let u1 = Address::generate(&env);
+
+        let entries = soroban_sdk::vec![
+            &env,
+            acl::BulkPermissionEntry {
+                grantee: u1.clone(),
+                permission: acl::Permission::ViewHealth,
+                expires_at: 0,
+            },
+            acl::BulkPermissionEntry {
+                grantee: u1.clone(),
+                permission: acl::Permission::ViewPrice,
+                expires_at: 0,
+            },
+        ];
+        client.acl_bulk_grant_permissions(&admin, &entries);
+
+        assert!(client.acl_has_permission(&u1, &acl::Permission::ViewHealth));
+        assert!(client.acl_has_permission(&u1, &acl::Permission::ViewPrice));
+    }
+
+    #[test]
+    fn test_acl_bulk_revoke_permissions() {
+        let (env, client, admin) = setup();
+        let u1 = Address::generate(&env);
+
+        let grant_entries = soroban_sdk::vec![
+            &env,
+            acl::BulkPermissionEntry {
+                grantee: u1.clone(),
+                permission: acl::Permission::ViewHealth,
+                expires_at: 0,
+            },
+        ];
+        client.acl_bulk_grant_permissions(&admin, &grant_entries);
+
+        let revoke_entries = soroban_sdk::vec![
+            &env,
+            acl::BulkPermissionEntry {
+                grantee: u1.clone(),
+                permission: acl::Permission::ViewHealth,
+                expires_at: 0,
+            },
+        ];
+        client.acl_bulk_revoke_permissions(&admin, &revoke_entries);
+
+        assert!(!client.acl_has_permission(&u1, &acl::Permission::ViewHealth));
+    }
+
+    #[test]
+    fn test_acl_manage_permissions_role_can_grant() {
+        let (env, client, admin) = setup();
+        let manager = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        // Grant manager the ManagePermissions permission directly
+        client.acl_grant_permission(&admin, &manager, &acl::Permission::ManagePermissions, &0);
+
+        // Manager can now grant roles to others
+        client.acl_grant_role(&manager, &user, &acl::Role::ReadOnly, &0);
+        assert!(client.acl_has_role(&user, &acl::Role::ReadOnly));
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_acl_unauthorized_grant_panics() {
+        let (env, client, _admin) = setup();
+        let stranger = Address::generate(&env);
+        let victim = Address::generate(&env);
+
+        client.acl_grant_role(&stranger, &victim, &acl::Role::ReadOnly, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_acl_unauthorized_revoke_panics() {
+        let (env, client, admin) = setup();
+        let stranger = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.acl_grant_role(&admin, &user, &acl::Role::ReadOnly, &0);
+        client.acl_revoke_role(&stranger, &user, &acl::Role::ReadOnly);
+    }
+
+    #[test]
+    fn test_acl_admin_always_has_permission() {
+        let (_env, client, admin) = setup();
+        // Admin has no explicit ACL grants but should pass all permission checks
+        assert!(client.acl_has_permission(&admin, &acl::Permission::ManageUpgrades));
+        assert!(client.acl_has_permission(&admin, &acl::Permission::EmergencyPause));
+        assert!(client.acl_has_permission(&admin, &acl::Permission::ManagePermissions));
+    }
+
+    #[test]
+    fn test_acl_multiple_admins_via_super_admin_role() {
+        let (env, client, admin) = setup();
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+
+        client.acl_grant_role(&admin, &admin2, &acl::Role::SuperAdmin, &0);
+        // admin2 can now grant roles to admin3
+        client.acl_grant_role(&admin2, &admin3, &acl::Role::Admin, &0);
+
+        assert!(client.acl_has_role(&admin3, &acl::Role::Admin));
+        assert!(client.acl_has_permission(&admin3, &acl::Permission::SubmitHealth));
+    }
+
+    #[test]
+    #[should_panic(expected = "bulk grant exceeds maximum of 20 entries")]
+    fn test_acl_bulk_grant_exceeds_limit() {
+        let (env, client, admin) = setup();
+        let mut entries = soroban_sdk::Vec::new(&env);
+        for _ in 0..21 {
+            entries.push_back(acl::BulkRoleEntry {
+                grantee: Address::generate(&env),
+                role: acl::Role::ReadOnly,
+                expires_at: 0,
+            });
+        }
+        client.acl_bulk_grant_roles(&admin, &entries);
+    }
+
+    // -----------------------------------------------------------------------
+    // Configuration Management tests (issue #103)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_and_get_config() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "health_score_min");
+        let desc = String::from_str(&env, "Minimum health score threshold");
+
+        client.set_config(&admin, &ConfigCategory::Threshold, &name, &75, &desc);
+
+        let entry = client
+            .get_config(&ConfigCategory::Threshold, &name)
+            .unwrap();
+        assert_eq!(entry.value.value, 75);
+        assert_eq!(entry.version, 1);
+        assert_eq!(entry.category, ConfigCategory::Threshold);
+        assert_eq!(entry.name, name);
+    }
+
+    #[test]
+    fn test_config_versioning_increments_on_each_write() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "price_deviation_low_bps");
+        let desc = String::from_str(&env, "Low deviation threshold in bps");
+
+        client.set_config(&admin, &ConfigCategory::Threshold, &name, &200, &desc);
+        let v1 = client
+            .get_config(&ConfigCategory::Threshold, &name)
+            .unwrap();
+        assert_eq!(v1.version, 1);
+        assert_eq!(v1.value.value, 200);
+
+        client.set_config(&admin, &ConfigCategory::Threshold, &name, &300, &desc);
+        let v2 = client
+            .get_config(&ConfigCategory::Threshold, &name)
+            .unwrap();
+        assert_eq!(v2.version, 2);
+        assert_eq!(v2.value.value, 300);
+
+        client.set_config(&admin, &ConfigCategory::Threshold, &name, &400, &desc);
+        let v3 = client
+            .get_config(&ConfigCategory::Threshold, &name)
+            .unwrap();
+        assert_eq!(v3.version, 3);
+    }
+
+    #[test]
+    fn test_config_audit_log_is_appended() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "pause_timelock_seconds");
+        let desc = String::from_str(&env, "Timelock for unpause");
+
+        // Timeouts category
+        client.set_config(&admin, &ConfigCategory::Timeouts, &name, &300, &desc);
+        client.set_config(&admin, &ConfigCategory::Timeouts, &name, &600, &desc);
+
+        let log = client.get_config_audit_log(&ConfigCategory::Timeouts, &name);
+        assert_eq!(log.len(), 2);
+
+        let first = log.get(0).unwrap();
+        assert_eq!(first.old_value, 0); // no prior value
+        assert_eq!(first.new_value, 300);
+        assert_eq!(first.version, 1);
+
+        let second = log.get(1).unwrap();
+        assert_eq!(second.old_value, 300);
+        assert_eq!(second.new_value, 600);
+        assert_eq!(second.version, 2);
+    }
+
+    #[test]
+    fn test_get_all_configs_returns_all_stored_entries() {
+        let (env, client, admin) = setup();
+
+        let n1 = String::from_str(&env, "max_monitored_assets");
+        let d1 = String::from_str(&env, "Max assets");
+        let n2 = String::from_str(&env, "max_batch_size");
+        let d2 = String::from_str(&env, "Max batch");
+
+        client.set_config(&admin, &ConfigCategory::Limits, &n1, &100, &d1);
+        client.set_config(&admin, &ConfigCategory::Limits, &n2, &50, &d2);
+
+        let export = client.get_all_configs();
+        assert_eq!(export.total, 2);
+        assert_eq!(export.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_bulk_config_update() {
+        let (env, client, admin) = setup();
+
+        let mut updates: Vec<BulkConfigUpdate> = Vec::new(&env);
+        updates.push_back(BulkConfigUpdate {
+            category: ConfigCategory::Threshold,
+            name: String::from_str(&env, "health_score_min"),
+            value: 60,
+            description: String::from_str(&env, "Min health score"),
+        });
+        updates.push_back(BulkConfigUpdate {
+            category: ConfigCategory::Timeouts,
+            name: String::from_str(&env, "price_staleness_seconds"),
+            value: 1800,
+            description: String::from_str(&env, "Staleness window"),
+        });
+
+        client.set_config_bulk(&admin, &updates);
+
+        let e1 = client
+            .get_config(
+                &ConfigCategory::Threshold,
+                &String::from_str(&env, "health_score_min"),
+            )
+            .unwrap();
+        assert_eq!(e1.value.value, 60);
+
+        let e2 = client
+            .get_config(
+                &ConfigCategory::Timeouts,
+                &String::from_str(&env, "price_staleness_seconds"),
+            )
+            .unwrap();
+        assert_eq!(e2.value.value, 1800);
+    }
+
+    #[test]
+    fn test_init_default_config_seeds_all_defaults() {
+        let (env, client, admin) = setup();
+
+        client.init_default_config(&admin);
+
+        let export = client.get_all_configs();
+        // 5 thresholds + 4 timeouts + 4 limits = 13 defaults
+        assert_eq!(export.total, 13);
+
+        // Spot-check a few values
+        let health_min = client
+            .get_config(
+                &ConfigCategory::Threshold,
+                &String::from_str(&env, "health_score_min"),
+            )
+            .unwrap();
+        assert_eq!(health_min.value.value, 50);
+
+        let max_assets = client
+            .get_config(
+                &ConfigCategory::Limits,
+                &String::from_str(&env, "max_monitored_assets"),
+            )
+            .unwrap();
+        assert_eq!(max_assets.value.value, 100);
+
+        let staleness = client
+            .get_config(
+                &ConfigCategory::Timeouts,
+                &String::from_str(&env, "price_staleness_seconds"),
+            )
+            .unwrap();
+        assert_eq!(staleness.value.value, 3600);
+    }
+
+    #[test]
+    fn test_init_default_config_does_not_overwrite_existing() {
+        let (env, client, admin) = setup();
+
+        // Set a custom value before seeding defaults
+        let name = String::from_str(&env, "health_score_min");
+        let desc = String::from_str(&env, "Custom override");
+        client.set_config(&admin, &ConfigCategory::Threshold, &name, &99, &desc);
+
+        client.init_default_config(&admin);
+
+        let entry = client
+            .get_config(&ConfigCategory::Threshold, &name)
+            .unwrap();
+        // Should still be the custom value, not the default 50
+        assert_eq!(entry.value.value, 99);
+        assert_eq!(entry.version, 1); // no extra write happened
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized: only admin may modify configuration")]
+    fn test_set_config_non_admin_panics() {
+        let (env, client, _admin) = setup();
+
+        let non_admin = Address::generate(&env);
+        let name = String::from_str(&env, "health_score_min");
+        let desc = String::from_str(&env, "desc");
+
+        client.set_config(&non_admin, &ConfigCategory::Threshold, &name, &50, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: name must not be empty")]
+    fn test_set_config_empty_name_panics() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "");
+        let desc = String::from_str(&env, "valid description");
+
+        client.set_config(&admin, &ConfigCategory::Threshold, &name, &50, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: description must not be empty")]
+    fn test_set_config_empty_description_panics() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "valid_name");
+        let desc = String::from_str(&env, "");
+
+        client.set_config(&admin, &ConfigCategory::Threshold, &name, &50, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: threshold value must be")]
+    fn test_set_config_negative_threshold_panics() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "health_score_min");
+        let desc = String::from_str(&env, "desc");
+
+        client.set_config(&admin, &ConfigCategory::Threshold, &name, &-1, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: timeout value must be")]
+    fn test_set_config_zero_timeout_panics() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "pause_timelock_seconds");
+        let desc = String::from_str(&env, "desc");
+
+        client.set_config(&admin, &ConfigCategory::Timeouts, &name, &0, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: limit value must be")]
+    fn test_set_config_zero_limit_panics() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "max_monitored_assets");
+        let desc = String::from_str(&env, "desc");
+
+        client.set_config(&admin, &ConfigCategory::Limits, &name, &0, &desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "config: bulk update list must not be empty")]
+    fn test_bulk_config_empty_list_panics() {
+        let (env, client, admin) = setup();
+
+        let updates: Vec<BulkConfigUpdate> = Vec::new(&env);
+        client.set_config_bulk(&admin, &updates);
+    }
+
+    #[test]
+    fn test_get_config_returns_none_for_unknown_key() {
+        let (env, client, _admin) = setup();
+
+        let result = client.get_config(
+            &ConfigCategory::Threshold,
+            &String::from_str(&env, "nonexistent_key"),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_config_event_emitted_on_set() {
+        let (env, client, admin) = setup();
+
+        let name = String::from_str(&env, "health_score_min");
+        let desc = String::from_str(&env, "desc");
+
+        client.set_config(&admin, &ConfigCategory::Threshold, &name, &75, &desc);
+
+        // Verify at least one event was published
+        let events = env.events().all();
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn test_config_all_three_categories() {
+        let (env, client, admin) = setup();
+
+        client.set_config(
+            &admin,
+            &ConfigCategory::Threshold,
+            &String::from_str(&env, "t_param"),
+            &100,
+            &String::from_str(&env, "threshold param"),
+        );
+        client.set_config(
+            &admin,
+            &ConfigCategory::Timeouts,
+            &String::from_str(&env, "to_param"),
+            &60,
+            &String::from_str(&env, "timeout param"),
+        );
+        client.set_config(
+            &admin,
+            &ConfigCategory::Limits,
+            &String::from_str(&env, "l_param"),
+            &10,
+            &String::from_str(&env, "limit param"),
+        );
+
+        let export = client.get_all_configs();
+        assert_eq!(export.total, 3);
     }
 }
