@@ -198,6 +198,34 @@ pub struct ExpirationPolicy {
     pub mismatch_ttl_secs: u64,
     pub liquidity_ttl_secs: u64,
     pub preserve_latest_history: bool,
+
+/// Time period for statistical analysis.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StatPeriod {
+    Hour,
+    Day,
+    Week,
+    Month,
+}
+
+/// Statistical metrics for an asset over a time period.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Statistics {
+    pub asset_code: String,
+    pub period: StatPeriod,
+    pub data_points: u32,
+    pub average: i128,
+    pub stddev: i128,
+    pub volatility: i128,
+    pub min: i128,
+    pub max: i128,
+    pub median: i128,
+    pub percentile_25: i128,
+    pub percentile_75: i128,
+    pub timestamp: u64,
+}
     pub version: u32,
 }
 
