@@ -719,6 +719,28 @@ pub enum DataKey {
     ConfigKeys,
     /// Audit trail for a specific parameter (Vec<ConfigAuditEntry>).
     ConfigAuditLog(ConfigCategory, String),
+    /// Historical statistics for an asset.
+    AssetStatistics(String),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StatPeriod {
+    Hour,
+    Day,
+    Week,
+    Month,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Statistics {
+    pub period: StatPeriod,
+    pub timestamp: u64,
+    pub health_avg: u32,
+    pub liquidity_avg: u32,
+    pub price_volatility: u32,
+    pub bridge_uptime: u32,
 }
 
 // ---------------------------------------------------------------------------
