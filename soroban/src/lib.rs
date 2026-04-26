@@ -103,6 +103,8 @@ mod keys {
     // Admin Activity Service (issue #299)
     pub const ADMIN_ACTIVITY_LOG: &str = "admin_activity_log";
     pub const ADMIN_ACTIVITY_CTR: &str = "admin_activity_ctr";
+    // Multi-Source Health Submission (issue #300)
+    pub const HEALTH_SOURCES: &str = "health_sources";
 }
 
 #[contracttype]
@@ -942,6 +944,67 @@ pub struct AllConfigsExport {
     pub total: u32,
     /// Ledger timestamp when this export was generated.
     pub exported_at: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Source Health Submission types (issue #300)
+// ---------------------------------------------------------------------------
+
+/// A trusted source that may submit health data via `submit_health_multi_source`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HealthSource {
+    /// Unique identifier for this source (e.g., "oracle-1", "bridge-node-a").
+    pub source_id: String,
+    /// Relative weight in basis points (10 000 = 100 %). Used in aggregation.
+    pub weight_bps: u32,
+    /// Whether this source is currently trusted to submit data.
+    pub trusted: bool,
+    /// Ledger timestamp when the source was registered.
+    pub registered_at: u64,
+}
+
+/// A per-source health data point stored for a specific asset.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourcedHealthEntry {
+    /// Source that submitted this entry.
+    pub source_id: String,
+    /// Asset this entry applies to.
+    pub asset_code: String,
+    pub health_score: u32,
+    pub liquidity_score: u32,
+    pub price_stability_score: u32,
+    pub bridge_uptime_score: u32,
+    /// Ledger timestamp of submission.
+    pub submitted_at: u64,
+}
+
+/// Weighted aggregation of all trusted source submissions for one asset.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AggregatedHealth {
+    pub asset_code: String,
+    /// Weighted-average health score across all contributing sources.
+    pub weighted_health_score: u32,
+    /// Weighted-average liquidity score.
+    pub weighted_liquidity_score: u32,
+    /// Weighted-average price stability score.
+    pub weighted_price_stability_score: u32,
+    /// Weighted-average bridge uptime score.
+    pub weighted_bridge_uptime_score: u32,
+    /// Number of trusted sources that contributed.
+    pub source_count: u32,
+    /// Ledger timestamp when this aggregation was computed.
+    pub computed_at: u64,
+}
+
+/// Storage key for per-source health entries (source_id → SourcedHealthEntry list).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HealthSourceDataKey {
+    /// Sourced entry for (source_id, asset_code).
+    Entry(String, String),
 }
 
 // ---------------------------------------------------------------------------
@@ -7542,6 +7605,227 @@ impl BridgeWatchContract {
         env.events()
             .publish((symbol_short!("adm_act"),), (seq, action));
     }
+
+    // -----------------------------------------------------------------------
+    // Multi-Source Health Submission (issue #300)
+    // -----------------------------------------------------------------------
+
+    /// Register a trusted health data source.
+    ///
+    /// Only the contract admin may register sources. `weight_bps` expresses the
+    /// source's relative influence in basis points (10 000 = 100 %). Multiple
+    /// sources need not sum to 10 000 — the aggregation normalises by total
+    /// weight of contributing sources.
+    ///
+    /// # Panics
+    /// - `caller` is not the contract admin.
+    /// - `weight_bps` is zero.
+    pub fn register_health_source(
+        env: Env,
+        caller: Address,
+        source_id: String,
+        weight_bps: u32,
+    ) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&keys::ADMIN).unwrap();
+        if caller != admin {
+            panic!("only admin can register health sources");
+        }
+        if weight_bps == 0 {
+            panic!("weight_bps must be greater than zero");
+        }
+        let now = env.ledger().timestamp();
+        let source = HealthSource {
+            source_id: source_id.clone(),
+            weight_bps,
+            trusted: true,
+            registered_at: now,
+        };
+        let mut sources: Vec<HealthSource> = env
+            .storage()
+            .instance()
+            .get(&keys::HEALTH_SOURCES)
+            .unwrap_or_else(|| Vec::new(&env));
+        // Replace if already registered, otherwise append
+        let mut found = false;
+        let mut updated: Vec<HealthSource> = Vec::new(&env);
+        for s in sources.iter() {
+            if s.source_id == source_id {
+                updated.push_back(source.clone());
+                found = true;
+            } else {
+                updated.push_back(s);
+            }
+        }
+        if !found {
+            updated.push_back(source);
+        }
+        env.storage().instance().set(&keys::HEALTH_SOURCES, &updated);
+        env.events()
+            .publish((symbol_short!("src_reg"), caller.clone()), source_id.clone());
+        Self::append_admin_activity(
+            &env,
+            AdminActivityAction::AssetRegistered,
+            caller,
+            source_id,
+        );
+    }
+
+    /// Revoke trust for a health source (it can no longer submit data).
+    ///
+    /// # Panics
+    /// - `caller` is not the contract admin.
+    /// - Source with `source_id` is not registered.
+    pub fn revoke_health_source(env: Env, caller: Address, source_id: String) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&keys::ADMIN).unwrap();
+        if caller != admin {
+            panic!("only admin can revoke health sources");
+        }
+        let mut sources: Vec<HealthSource> = env
+            .storage()
+            .instance()
+            .get(&keys::HEALTH_SOURCES)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut found = false;
+        let mut updated: Vec<HealthSource> = Vec::new(&env);
+        for s in sources.iter() {
+            if s.source_id == source_id {
+                let mut revoked = s.clone();
+                revoked.trusted = false;
+                updated.push_back(revoked);
+                found = true;
+            } else {
+                updated.push_back(s);
+            }
+        }
+        if !found {
+            panic!("health source not registered");
+        }
+        env.storage().instance().set(&keys::HEALTH_SOURCES, &updated);
+        env.events()
+            .publish((symbol_short!("src_rev"), caller), source_id);
+    }
+
+    /// Submit health data from a named trusted source.
+    ///
+    /// The source must be registered and trusted (see `register_health_source`).
+    /// Each source keeps its own per-asset entry; `get_aggregated_health` then
+    /// combines all trusted sources into a weighted-average view.
+    ///
+    /// # Panics
+    /// - `caller` is not the contract admin or a HealthSubmitter.
+    /// - `source_id` is not a registered trusted source.
+    pub fn submit_health_multi_source(
+        env: Env,
+        caller: Address,
+        source_id: String,
+        asset_code: String,
+        health_score: u32,
+        liquidity_score: u32,
+        price_stability_score: u32,
+        bridge_uptime_score: u32,
+    ) {
+        Self::assert_not_globally_paused(&env);
+        Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
+        // Verify this source is registered and trusted
+        let sources: Vec<HealthSource> = env
+            .storage()
+            .instance()
+            .get(&keys::HEALTH_SOURCES)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut is_trusted = false;
+        for s in sources.iter() {
+            if s.source_id == source_id && s.trusted {
+                is_trusted = true;
+                break;
+            }
+        }
+        if !is_trusted {
+            panic!("source is not registered or not trusted");
+        }
+        let now = env.ledger().timestamp();
+        let entry = SourcedHealthEntry {
+            source_id: source_id.clone(),
+            asset_code: asset_code.clone(),
+            health_score,
+            liquidity_score,
+            price_stability_score,
+            bridge_uptime_score,
+            submitted_at: now,
+        };
+        env.storage()
+            .persistent()
+            .set(&HealthSourceDataKey::Entry(source_id.clone(), asset_code.clone()), &entry);
+        env.events().publish(
+            (symbol_short!("ms_hlth"), caller.clone(), asset_code.clone()),
+            (source_id, health_score, now),
+        );
+        Self::append_admin_activity(
+            &env,
+            AdminActivityAction::HealthSubmitted,
+            caller,
+            asset_code,
+        );
+    }
+
+    /// Compute a weighted-average health view for an asset across all trusted sources.
+    ///
+    /// Sources with no entry for `asset_code` are skipped. Returns `None` if no
+    /// trusted source has submitted data for the asset.
+    pub fn get_aggregated_health(env: Env, asset_code: String) -> Option<AggregatedHealth> {
+        let sources: Vec<HealthSource> = env
+            .storage()
+            .instance()
+            .get(&keys::HEALTH_SOURCES)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut total_weight: u64 = 0;
+        let mut weighted_health: u64 = 0;
+        let mut weighted_liquidity: u64 = 0;
+        let mut weighted_price: u64 = 0;
+        let mut weighted_uptime: u64 = 0;
+        let mut count: u32 = 0;
+
+        for source in sources.iter() {
+            if !source.trusted {
+                continue;
+            }
+            let key = HealthSourceDataKey::Entry(source.source_id.clone(), asset_code.clone());
+            let entry: Option<SourcedHealthEntry> = env.storage().persistent().get(&key);
+            if let Some(e) = entry {
+                let w = source.weight_bps as u64;
+                total_weight += w;
+                weighted_health += w * e.health_score as u64;
+                weighted_liquidity += w * e.liquidity_score as u64;
+                weighted_price += w * e.price_stability_score as u64;
+                weighted_uptime += w * e.bridge_uptime_score as u64;
+                count += 1;
+            }
+        }
+
+        if count == 0 || total_weight == 0 {
+            return None;
+        }
+
+        Some(AggregatedHealth {
+            asset_code,
+            weighted_health_score: (weighted_health / total_weight) as u32,
+            weighted_liquidity_score: (weighted_liquidity / total_weight) as u32,
+            weighted_price_stability_score: (weighted_price / total_weight) as u32,
+            weighted_bridge_uptime_score: (weighted_uptime / total_weight) as u32,
+            source_count: count,
+            computed_at: env.ledger().timestamp(),
+        })
+    }
+
+    /// Return the list of all registered health sources.
+    pub fn get_health_sources(env: Env) -> Vec<HealthSource> {
+        env.storage()
+            .instance()
+            .get(&keys::HEALTH_SOURCES)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
 }
 
 #[cfg(test)]
@@ -11322,5 +11606,125 @@ mod tests {
         let page = client.get_admin_activity(&10, &0);
         assert_eq!(page.total, 0);
         assert_eq!(page.entries.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-Source Health Submission tests (issue #300)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_register_health_source_stores_source() {
+        let (env, client, admin) = setup();
+        let source_id = String::from_str(&env, "oracle-1");
+        client.register_health_source(&admin, &source_id, &5000);
+        let sources = client.get_health_sources();
+        assert_eq!(sources.len(), 1);
+        let s = sources.get(0).unwrap();
+        assert_eq!(s.source_id, source_id);
+        assert_eq!(s.weight_bps, 5000);
+        assert!(s.trusted);
+    }
+
+    #[test]
+    fn test_register_health_source_update_existing() {
+        let (env, client, admin) = setup();
+        let source_id = String::from_str(&env, "oracle-1");
+        client.register_health_source(&admin, &source_id, &5000);
+        client.register_health_source(&admin, &source_id, &8000);
+        let sources = client.get_health_sources();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources.get(0).unwrap().weight_bps, 8000);
+    }
+
+    #[test]
+    #[should_panic(expected = "weight_bps must be greater than zero")]
+    fn test_register_health_source_zero_weight_panics() {
+        let (env, client, admin) = setup();
+        client.register_health_source(&admin, &String::from_str(&env, "oracle-1"), &0);
+    }
+
+    #[test]
+    fn test_submit_health_multi_source_stores_entry() {
+        let (env, client, admin) = setup();
+        let source_id = String::from_str(&env, "oracle-1");
+        let asset = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &asset);
+        client.register_health_source(&admin, &source_id, &10000);
+        client.submit_health_multi_source(&admin, &source_id, &asset, &90, &85, &80, &95);
+        let agg = client.get_aggregated_health(&asset).unwrap();
+        assert_eq!(agg.weighted_health_score, 90);
+        assert_eq!(agg.source_count, 1);
+    }
+
+    #[test]
+    fn test_aggregated_health_weighted_average_two_sources() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &asset);
+        let src1 = String::from_str(&env, "oracle-1");
+        let src2 = String::from_str(&env, "oracle-2");
+        // src1 weight=3000 (30%), score=100; src2 weight=7000 (70%), score=50
+        // Expected weighted avg = (3000*100 + 7000*50) / 10000 = (300000+350000)/10000 = 65
+        client.register_health_source(&admin, &src1, &3000);
+        client.register_health_source(&admin, &src2, &7000);
+        client.submit_health_multi_source(&admin, &src1, &asset, &100, &100, &100, &100);
+        client.submit_health_multi_source(&admin, &src2, &asset, &50, &50, &50, &50);
+        let agg = client.get_aggregated_health(&asset).unwrap();
+        assert_eq!(agg.weighted_health_score, 65);
+        assert_eq!(agg.source_count, 2);
+    }
+
+    #[test]
+    fn test_aggregated_health_returns_none_when_no_submissions() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &asset);
+        client.register_health_source(&admin, &String::from_str(&env, "oracle-1"), &10000);
+        // No submission made
+        let agg = client.get_aggregated_health(&asset);
+        assert!(agg.is_none());
+    }
+
+    #[test]
+    fn test_revoke_health_source_excludes_from_aggregation() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &asset);
+        let src = String::from_str(&env, "oracle-1");
+        client.register_health_source(&admin, &src, &10000);
+        client.submit_health_multi_source(&admin, &src, &asset, &90, &80, &70, &60);
+        client.revoke_health_source(&admin, &src);
+        // After revoke, the revoked source should not contribute to aggregation
+        let agg = client.get_aggregated_health(&asset);
+        assert!(agg.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "source is not registered or not trusted")]
+    fn test_submit_multi_source_unregistered_source_panics() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &asset);
+        client.submit_health_multi_source(
+            &admin,
+            &String::from_str(&env, "unknown"),
+            &asset,
+            &80,
+            &80,
+            &80,
+            &80,
+        );
+    }
+
+    #[test]
+    fn test_submit_multi_source_emits_event() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let src = String::from_str(&env, "oracle-1");
+        client.register_asset(&admin, &asset);
+        client.register_health_source(&admin, &src, &10000);
+        client.submit_health_multi_source(&admin, &src, &asset, &80, &80, &80, &80);
+        let events = env.events().all();
+        assert!(!events.is_empty());
     }
 }
