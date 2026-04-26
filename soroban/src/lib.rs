@@ -59,6 +59,7 @@ mod keys {
     pub const PRICE_HISTORY: &str = "price_history";
     pub const HEALTH_WEIGHTS: &str = "health_weights";
     pub const HEALTH_SCORE_RESULT: &str = "health_score_result";
+    pub const RISK_SCORE_CONFIG: &str = "risk_score_config";
     pub const CHECKPOINT_CONFIG: &str = "checkpoint_config";
     pub const CHECKPOINT_COUNTER: &str = "checkpoint_counter";
     pub const CHECKPOINT_METADATA_LIST: &str = "checkpoint_metadata_list";
@@ -159,6 +160,52 @@ pub struct HealthScoreResult {
     pub timestamp: u64,
     /// Timestamp after which the stored calculation result may be cleaned up.
     pub expires_at: u64,
+}
+
+/// Configuration for deterministic contract-side risk score calculation.
+///
+/// The three weights are expressed in basis points and must sum to exactly
+/// 10,000. `max_price_deviation_bps` and `max_volatility_bps` define the
+/// normalization ceilings for raw price and volatility inputs.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RiskScoreConfig {
+    /// Weight assigned to the inverted health signal.
+    pub health_weight_bps: u32,
+    /// Weight assigned to the price deviation signal.
+    pub price_weight_bps: u32,
+    /// Weight assigned to the volatility signal.
+    pub volatility_weight_bps: u32,
+    /// Price deviation level that maps to maximum normalized risk.
+    pub max_price_deviation_bps: u32,
+    /// Volatility level that maps to maximum normalized risk.
+    pub max_volatility_bps: u32,
+    /// Methodology version identifier for auditability.
+    pub version: u32,
+}
+
+/// Output of the deterministic risk score calculation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RiskScoreResult {
+    /// Composite risk score normalized to basis points (0–10,000).
+    pub risk_score_bps: u32,
+    /// Inverted health contribution normalized to basis points.
+    pub normalized_health_risk_bps: u32,
+    /// Price deviation contribution normalized to basis points.
+    pub normalized_price_risk_bps: u32,
+    /// Volatility contribution normalized to basis points.
+    pub normalized_volatility_risk_bps: u32,
+    /// Raw health score input (0–100).
+    pub health_score: u32,
+    /// Raw price deviation input in basis points.
+    pub price_deviation_bps: u32,
+    /// Raw volatility input in basis points.
+    pub volatility_bps: u32,
+    /// Configuration applied during the calculation.
+    pub config: RiskScoreConfig,
+    /// Ledger timestamp when the calculation was performed.
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -565,6 +612,7 @@ pub struct CheckpointSnapshot {
     pub label: String,
     pub monitored_assets: Vec<String>,
     pub health_weights: HealthWeights,
+    pub risk_score_config: RiskScoreConfig,
     pub assets: Vec<CheckpointAssetState>,
     pub restored_from: Option<u64>,
 }
@@ -750,6 +798,7 @@ pub enum DataKey {
     SignatureThreshold,
     LiquidityPairs,
     HealthWeights,
+    RiskScoreConfig,
     CheckpointConfig,
     CheckpointCounter,
     ChkpntMetaList,
@@ -1683,7 +1732,7 @@ impl BridgeWatchContract {
     }
 
     /// Remove the per-asset deviation threshold override.
-    pub fn clear_deviation_threshold_override(env: Env, caller: Address, asset_code: String) {
+    pub fn clear_dev_threshold_override(env: Env, caller: Address, asset_code: String) {
         Self::assert_can_manage_threshold_overrides(&env, &caller);
 
         let key = AssetDataKey::DevThreshOvr(asset_code.clone());
@@ -1895,7 +1944,7 @@ impl BridgeWatchContract {
     }
 
     /// Remove the per-asset mismatch threshold override.
-    pub fn clear_mismatch_threshold_override(env: Env, caller: Address, asset_code: String) {
+    pub fn clear_mm_threshold_override(env: Env, caller: Address, asset_code: String) {
         Self::assert_can_manage_threshold_overrides(&env, &caller);
 
         let key = AssetDataKey::MmThreshOvr(asset_code.clone());
@@ -4418,15 +4467,31 @@ impl BridgeWatchContract {
     }
 
     fn deviation_override_audit_name(env: &Env, asset_code: &String) -> String {
-        let mut name = String::from_str(env, "deviation_override_");
-        name.push_str(asset_code);
-        name
+        let prefix = b"deviation_override_";
+        let asset_len = asset_code.len() as usize;
+        if asset_len > 256 {
+            panic!("asset code too long");
+        }
+
+        let total_len = prefix.len() + asset_len;
+        let mut raw = [0u8; 512];
+        raw[..prefix.len()].copy_from_slice(prefix);
+        asset_code.copy_into_slice(&mut raw[prefix.len()..total_len]);
+        String::from_bytes(env, &raw[..total_len])
     }
 
     fn mismatch_override_audit_name(env: &Env, asset_code: &String) -> String {
-        let mut name = String::from_str(env, "mismatch_override_");
-        name.push_str(asset_code);
-        name
+        let prefix = b"mismatch_override_";
+        let asset_len = asset_code.len() as usize;
+        if asset_len > 256 {
+            panic!("asset code too long");
+        }
+
+        let total_len = prefix.len() + asset_len;
+        let mut raw = [0u8; 512];
+        raw[..prefix.len()].copy_from_slice(prefix);
+        asset_code.copy_into_slice(&mut raw[prefix.len()..total_len]);
+        String::from_bytes(env, &raw[..total_len])
     }
 
     /// Panic if the contract is currently globally paused.
@@ -4956,6 +5021,124 @@ impl BridgeWatchContract {
             .get(&AssetDataKey::HealthRes(asset_code.clone()))
     }
 
+    /// Store configuration for deterministic risk score calculations.
+    ///
+    /// `caller` must be the contract admin or a `SuperAdmin`. The weights are
+    /// expressed in basis points and must sum to exactly 10,000.
+    pub fn set_risk_score_config(
+        env: Env,
+        caller: Address,
+        health_weight_bps: u32,
+        price_weight_bps: u32,
+        volatility_weight_bps: u32,
+        max_price_deviation_bps: u32,
+        max_volatility_bps: u32,
+        version: u32,
+    ) {
+        Self::assert_not_globally_paused(&env);
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&keys::ADMIN).unwrap();
+        Self::check_no_pending_transfer(&env);
+        let authorized =
+            caller == admin || Self::has_role_internal(&env, &caller, AdminRole::SuperAdmin);
+        if !authorized {
+            panic!("only admin or SuperAdmin can set risk score config");
+        }
+
+        Self::validate_risk_score_config(
+            health_weight_bps,
+            price_weight_bps,
+            volatility_weight_bps,
+            max_price_deviation_bps,
+            max_volatility_bps,
+            version,
+        );
+
+        let config = RiskScoreConfig {
+            health_weight_bps,
+            price_weight_bps,
+            volatility_weight_bps,
+            max_price_deviation_bps,
+            max_volatility_bps,
+            version,
+        };
+
+        env.storage()
+            .instance()
+            .set(&keys::RISK_SCORE_CONFIG, &config);
+
+        env.events()
+            .publish((symbol_short!("risk_cfg"),), version);
+        Self::maybe_create_auto_checkpoint(&env, &caller);
+    }
+
+    /// Return the active risk score calculation configuration.
+    ///
+    /// Public read access — no authorisation required. Returns the configured
+    /// values or the defaults when no custom configuration has been stored.
+    pub fn get_risk_score_config(env: Env) -> RiskScoreConfig {
+        Self::load_risk_score_config(&env)
+    }
+
+    /// Pure deterministic calculation for the composite risk score.
+    ///
+    /// The output is normalized to basis points (0–10,000) and combines:
+    /// 1. Inverted health score
+    /// 2. Price deviation
+    /// 3. Volatility
+    ///
+    /// Price and volatility inputs are clamped to the configured normalization
+    /// ceilings before the weighted average is computed.
+    pub fn calculate_risk_score(
+        env: Env,
+        health_score: u32,
+        price_deviation_bps: u32,
+        volatility_bps: u32,
+    ) -> RiskScoreResult {
+        Self::validate_score_range(health_score, "health_score");
+        Self::build_risk_score_result(
+            &env,
+            health_score,
+            price_deviation_bps,
+            volatility_bps,
+        )
+    }
+
+    /// Derive a risk score for an asset from stored health and price history.
+    ///
+    /// Public read access — no authorisation required. Returns `None` when the
+    /// asset has no stored health record.
+    pub fn get_asset_risk_score(
+        env: Env,
+        asset_code: String,
+        period: StatPeriod,
+    ) -> Option<RiskScoreResult> {
+        let health: AssetHealth = env
+            .storage()
+            .persistent()
+            .get(&AssetDataKey::Health(asset_code.clone()))?;
+        let period_secs = Self::stat_period_secs(&period);
+        let prices = Self::collect_prices_for_period(&env, &asset_code, period_secs);
+        let price_deviation_bps =
+            Self::calculate_latest_price_deviation_bps(env.clone(), prices.clone());
+        let volatility_bps = if prices.len() < 2 {
+            0
+        } else {
+            Self::clamp_i128_to_u32(Self::calculate_volatility(
+                env.clone(),
+                prices,
+                period_secs,
+            ))
+        };
+
+        Some(Self::build_risk_score_result(
+            &env,
+            health.health_score,
+            price_deviation_bps,
+            volatility_bps,
+        ))
+    }
+
     /// Update automatic checkpoint settings.
     pub fn set_checkpoint_config(
         env: Env,
@@ -5072,6 +5255,7 @@ impl BridgeWatchContract {
         let current_assets = Self::load_registered_assets_raw(&env);
         let restored_assets = snapshot.monitored_assets.clone();
         let restored_weights = snapshot.health_weights.clone();
+        let restored_risk_score_config = snapshot.risk_score_config.clone();
         for asset_code in current_assets.iter() {
             if !Self::vec_contains_string(&restored_assets, &asset_code) {
                 env.storage()
@@ -5092,6 +5276,9 @@ impl BridgeWatchContract {
         env.storage()
             .instance()
             .set(&keys::HEALTH_WEIGHTS, &restored_weights);
+        env.storage()
+            .instance()
+            .set(&keys::RISK_SCORE_CONFIG, &restored_risk_score_config);
 
         for asset in snapshot.assets.iter() {
             env.storage().persistent().set(
@@ -5151,6 +5338,17 @@ impl BridgeWatchContract {
             liquidity_weight: 30,
             price_stability_weight: 40,
             bridge_uptime_weight: 30,
+            version: 1,
+        }
+    }
+
+    fn default_risk_score_config() -> RiskScoreConfig {
+        RiskScoreConfig {
+            health_weight_bps: 5_000,
+            price_weight_bps: 2_500,
+            volatility_weight_bps: 2_500,
+            max_price_deviation_bps: 2_000,
+            max_volatility_bps: 5_000,
             version: 1,
         }
     }
@@ -5835,6 +6033,7 @@ impl BridgeWatchContract {
         let created_at = env.ledger().timestamp();
         let monitored_assets = Self::load_registered_assets_raw(env);
         let health_weights = Self::load_health_weights(env);
+        let risk_score_config = Self::load_risk_score_config(env);
         let mut assets = Vec::new(env);
 
         for asset_code in monitored_assets.iter() {
@@ -5884,6 +6083,7 @@ impl BridgeWatchContract {
             label: label.clone(),
             monitored_assets: monitored_assets.clone(),
             health_weights,
+            risk_score_config,
             assets,
             restored_from,
         };
@@ -5962,6 +6162,12 @@ impl BridgeWatchContract {
         Self::append_u32(&mut data, snapshot.health_weights.price_stability_weight);
         Self::append_u32(&mut data, snapshot.health_weights.bridge_uptime_weight);
         Self::append_u32(&mut data, snapshot.health_weights.version);
+        Self::append_u32(&mut data, snapshot.risk_score_config.health_weight_bps);
+        Self::append_u32(&mut data, snapshot.risk_score_config.price_weight_bps);
+        Self::append_u32(&mut data, snapshot.risk_score_config.volatility_weight_bps);
+        Self::append_u32(&mut data, snapshot.risk_score_config.max_price_deviation_bps);
+        Self::append_u32(&mut data, snapshot.risk_score_config.max_volatility_bps);
+        Self::append_u32(&mut data, snapshot.risk_score_config.version);
 
         for asset_code in snapshot.monitored_assets.iter() {
             Self::append_string(&mut data, &asset_code);
@@ -6208,6 +6414,13 @@ impl BridgeWatchContract {
             })
     }
 
+    fn load_risk_score_config(env: &Env) -> RiskScoreConfig {
+        env.storage()
+            .instance()
+            .get(&keys::RISK_SCORE_CONFIG)
+            .unwrap_or_else(Self::default_risk_score_config)
+    }
+
     /// Validate that three weights are each ≤ 100 and sum to exactly 100.
     fn validate_weights(liq: u32, stab: u32, up: u32) {
         if liq > 100 || stab > 100 || up > 100 {
@@ -6225,6 +6438,34 @@ impl BridgeWatchContract {
         }
     }
 
+    fn validate_risk_score_config(
+        health_weight_bps: u32,
+        price_weight_bps: u32,
+        volatility_weight_bps: u32,
+        max_price_deviation_bps: u32,
+        max_volatility_bps: u32,
+        version: u32,
+    ) {
+        if health_weight_bps > 10_000
+            || price_weight_bps > 10_000
+            || volatility_weight_bps > 10_000
+        {
+            panic!("risk weights must be between 0 and 10000");
+        }
+        if health_weight_bps + price_weight_bps + volatility_weight_bps != 10_000 {
+            panic!("risk weights must sum to 10000");
+        }
+        if max_price_deviation_bps == 0 {
+            panic!("max_price_deviation_bps must be greater than zero");
+        }
+        if max_volatility_bps == 0 {
+            panic!("max_volatility_bps must be greater than zero");
+        }
+        if version == 0 {
+            panic!("risk score config version must be greater than 0");
+        }
+    }
+
     /// Compute the weighted-average composite score.
     ///
     /// `composite = (liq * liq_w + stab * stab_w + up * up_w) / 100`
@@ -6238,6 +6479,114 @@ impl BridgeWatchContract {
             + (price_stability_score as u64) * (weights.price_stability_weight as u64)
             + (bridge_uptime_score as u64) * (weights.bridge_uptime_weight as u64);
         (weighted_sum / 100) as u32
+    }
+
+    fn build_risk_score_result(
+        env: &Env,
+        health_score: u32,
+        price_deviation_bps: u32,
+        volatility_bps: u32,
+    ) -> RiskScoreResult {
+        let config = Self::load_risk_score_config(env);
+        let normalized_health_risk_bps = (100u32.saturating_sub(health_score)) * 100;
+        let normalized_price_risk_bps =
+            Self::normalize_signal_to_bps(price_deviation_bps, config.max_price_deviation_bps);
+        let normalized_volatility_risk_bps =
+            Self::normalize_signal_to_bps(volatility_bps, config.max_volatility_bps);
+
+        let weighted_sum = (normalized_health_risk_bps as u64)
+            * (config.health_weight_bps as u64)
+            + (normalized_price_risk_bps as u64) * (config.price_weight_bps as u64)
+            + (normalized_volatility_risk_bps as u64) * (config.volatility_weight_bps as u64);
+        let risk_score_bps = Self::clamp_bps_u64(weighted_sum / 10_000);
+
+        RiskScoreResult {
+            risk_score_bps,
+            normalized_health_risk_bps,
+            normalized_price_risk_bps,
+            normalized_volatility_risk_bps,
+            health_score,
+            price_deviation_bps,
+            volatility_bps,
+            config,
+            timestamp: env.ledger().timestamp(),
+        }
+    }
+
+    fn normalize_signal_to_bps(raw_signal_bps: u32, max_signal_bps: u32) -> u32 {
+        let clamped_signal = if raw_signal_bps > max_signal_bps {
+            max_signal_bps
+        } else {
+            raw_signal_bps
+        };
+
+        ((clamped_signal as u64) * 10_000 / (max_signal_bps as u64)) as u32
+    }
+
+    fn clamp_bps_u64(value: u64) -> u32 {
+        if value > 10_000 {
+            10_000
+        } else {
+            value as u32
+        }
+    }
+
+    fn clamp_i128_to_u32(value: i128) -> u32 {
+        if value <= 0 {
+            0
+        } else if value > u32::MAX as i128 {
+            u32::MAX
+        } else {
+            value as u32
+        }
+    }
+
+    fn stat_period_secs(period: &StatPeriod) -> u64 {
+        match period {
+            StatPeriod::Hour => 3_600,
+            StatPeriod::Day => 86_400,
+            StatPeriod::Week => 604_800,
+            StatPeriod::Month => 2_592_000,
+        }
+    }
+
+    fn collect_prices_for_period(env: &Env, asset_code: &String, period_secs: u64) -> Vec<i128> {
+        let history: Vec<PriceRecord> = env
+            .storage()
+            .persistent()
+            .get(&AssetDataKey::PriceHist(asset_code.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+        let now = env.ledger().timestamp();
+        let start_time = now.saturating_sub(period_secs);
+        let mut prices: Vec<i128> = Vec::new(env);
+
+        for record in history.iter() {
+            if record.timestamp >= start_time && record.timestamp <= now {
+                prices.push_back(record.price);
+            }
+        }
+
+        prices
+    }
+
+    fn calculate_latest_price_deviation_bps(env: Env, prices: Vec<i128>) -> u32 {
+        if prices.is_empty() {
+            return 0;
+        }
+
+        let average_price = Self::calculate_average(env, prices.clone());
+        if average_price <= 0 {
+            return 0;
+        }
+
+        let latest_price = prices.get(prices.len() - 1).unwrap();
+        let diff = if latest_price > average_price {
+            latest_price - average_price
+        } else {
+            average_price - latest_price
+        };
+
+        Self::clamp_i128_to_u32((diff * 10_000) / average_price)
     }
 
     // -----------------------------------------------------------------------
@@ -6472,12 +6821,7 @@ impl BridgeWatchContract {
 
         // Determine time range based on period
         let now = env.ledger().timestamp();
-        let period_secs = match period {
-            StatPeriod::Hour => 3600,
-            StatPeriod::Day => 86400,
-            StatPeriod::Week => 604800,
-            StatPeriod::Month => 2592000,
-        };
+        let period_secs = Self::stat_period_secs(&period);
         let start_time = now.saturating_sub(period_secs);
 
         // Get price history for the period
@@ -9506,6 +9850,85 @@ mod tests {
         let result = client.calculate_health_score(&60, &80, &100);
         assert_eq!(result.composite_score, 74);
         assert_eq!(result.weights.version, 2);
+    }
+
+    #[test]
+    fn test_get_risk_score_config_returns_defaults() {
+        let (_env, client, _admin) = setup();
+        let config = client.get_risk_score_config();
+        assert_eq!(config.health_weight_bps, 5_000);
+        assert_eq!(config.price_weight_bps, 2_500);
+        assert_eq!(config.volatility_weight_bps, 2_500);
+        assert_eq!(config.max_price_deviation_bps, 2_000);
+        assert_eq!(config.max_volatility_bps, 5_000);
+        assert_eq!(config.version, 1);
+    }
+
+    #[test]
+    fn test_set_risk_score_config_stores_custom_values() {
+        let (_env, client, admin) = setup();
+        client.set_risk_score_config(&admin, &4_000, &3_500, &2_500, &1_500, &4_000, &2);
+
+        let config = client.get_risk_score_config();
+        assert_eq!(config.health_weight_bps, 4_000);
+        assert_eq!(config.price_weight_bps, 3_500);
+        assert_eq!(config.volatility_weight_bps, 2_500);
+        assert_eq!(config.max_price_deviation_bps, 1_500);
+        assert_eq!(config.max_volatility_bps, 4_000);
+        assert_eq!(config.version, 2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_risk_score_config_rejects_invalid_weight_sum() {
+        let (_env, client, admin) = setup();
+        client.set_risk_score_config(&admin, &4_000, &3_000, &2_000, &2_000, &5_000, &1);
+    }
+
+    #[test]
+    fn test_calculate_risk_score_uses_weighted_normalized_inputs() {
+        let (env, client, _admin) = setup();
+        env.ledger().set_timestamp(3_000_000);
+
+        let result = client.calculate_risk_score(&80, &500, &1_250);
+        assert_eq!(result.normalized_health_risk_bps, 2_000);
+        assert_eq!(result.normalized_price_risk_bps, 2_500);
+        assert_eq!(result.normalized_volatility_risk_bps, 2_500);
+        assert_eq!(result.risk_score_bps, 2_250);
+        assert_eq!(result.timestamp, 3_000_000);
+    }
+
+    #[test]
+    fn test_calculate_risk_score_clamps_inputs_and_output() {
+        let (_env, client, _admin) = setup();
+
+        let result = client.calculate_risk_score(&0, &50_000, &50_000);
+        assert_eq!(result.normalized_health_risk_bps, 10_000);
+        assert_eq!(result.normalized_price_risk_bps, 10_000);
+        assert_eq!(result.normalized_volatility_risk_bps, 10_000);
+        assert_eq!(result.risk_score_bps, 10_000);
+    }
+
+    #[test]
+    fn test_get_asset_risk_score_reads_stored_health_and_price_history() {
+        let (env, client, admin) = setup();
+        let asset = String::from_str(&env, "USDC");
+        let source = String::from_str(&env, "oracle");
+        client.register_asset(&admin, &asset);
+        client.submit_health(&admin, &asset, &75, &80, &75, &70);
+
+        env.ledger().set_timestamp(100);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
+        env.ledger().set_timestamp(200);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
+        env.ledger().set_timestamp(300);
+        client.submit_price(&admin, &asset, &1_000_000, &source);
+
+        let result = client.get_asset_risk_score(&asset, &StatPeriod::Day).unwrap();
+        assert_eq!(result.health_score, 75);
+        assert_eq!(result.price_deviation_bps, 0);
+        assert_eq!(result.volatility_bps, 0);
+        assert_eq!(result.risk_score_bps, 1_250);
     }
 
     #[test]
