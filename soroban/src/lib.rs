@@ -100,6 +100,9 @@ mod keys {
     pub const RECOVERY_REASON: &str = "recovery_reason";
     pub const RECOVERY_ENTERED_AT: &str = "recovery_entered_at";
     pub const RECOVERY_ENTERED_BY: &str = "recovery_entered_by";
+    // Admin Activity Service (issue #299)
+    pub const ADMIN_ACTIVITY_LOG: &str = "admin_activity_log";
+    pub const ADMIN_ACTIVITY_CTR: &str = "admin_activity_ctr";
 }
 
 #[contracttype]
@@ -939,6 +942,52 @@ pub struct AllConfigsExport {
     pub total: u32,
     /// Ledger timestamp when this export was generated.
     pub exported_at: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Admin Activity Service types (issue #299)
+// ---------------------------------------------------------------------------
+
+/// Categories of admin actions captured by the activity log.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdminActivityAction {
+    HealthSubmitted,
+    PriceSubmitted,
+    AssetRegistered,
+    RoleGranted,
+    RoleRevoked,
+    ContractPaused,
+    ContractUnpaused,
+    ConfigUpdated,
+    RecoveryEntered,
+    RecoveryExited,
+}
+
+/// A single entry in the on-chain admin activity log.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminActivityEntry {
+    /// Monotonically-increasing sequence number (starts at 1).
+    pub sequence: u32,
+    /// Category of action taken.
+    pub action: AdminActivityAction,
+    /// Address that performed the action.
+    pub actor: Address,
+    /// Human-readable context (asset code, role name, reason, etc.).
+    pub detail: String,
+    /// Ledger timestamp when the action was recorded.
+    pub timestamp: u64,
+}
+
+/// Paginated result returned by `get_admin_activity`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminActivityPage {
+    /// Entries for the requested page.
+    pub entries: Vec<AdminActivityEntry>,
+    /// Total entries in the log (not just this page).
+    pub total: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -3103,7 +3152,8 @@ impl BridgeWatchContract {
             .set(&keys::PAUSE_HISTORY, &history);
 
         env.events()
-            .publish((symbol_short!("em_pause"), caller), reason);
+            .publish((symbol_short!("em_pause"), caller.clone()), reason.clone());
+        Self::append_admin_activity(&env, AdminActivityAction::ContractPaused, caller, reason);
     }
 
     /// Lift the global pause after the timelock has elapsed.
@@ -3152,7 +3202,8 @@ impl BridgeWatchContract {
             .set(&keys::PAUSE_HISTORY, &history);
 
         env.events()
-            .publish((symbol_short!("em_unpaus"), caller), reason);
+            .publish((symbol_short!("em_unpaus"), caller.clone()), reason.clone());
+        Self::append_admin_activity(&env, AdminActivityAction::ContractUnpaused, caller, reason);
     }
 
     /// Designate a dedicated pause guardian address.
@@ -7263,7 +7314,8 @@ impl BridgeWatchContract {
             .persistent()
             .set(&keys::RECOVERY_STEPS, &steps);
         env.events()
-            .publish((symbol_short!("rec_entr"), caller), (reason, now));
+            .publish((symbol_short!("rec_entr"), caller.clone()), (reason.clone(), now));
+        Self::append_admin_activity(&env, AdminActivityAction::RecoveryEntered, caller, reason);
     }
 
     /// Exit emergency recovery mode, returning the contract to normal operation.
@@ -7288,7 +7340,13 @@ impl BridgeWatchContract {
         let now = env.ledger().timestamp();
         env.storage().instance().set(&keys::RECOVERY_MODE, &false);
         env.events()
-            .publish((symbol_short!("rec_exit"), caller), now);
+            .publish((symbol_short!("rec_exit"), caller.clone()), now);
+        Self::append_admin_activity(
+            &env,
+            AdminActivityAction::RecoveryExited,
+            caller,
+            String::from_str(&env, "recovery mode ended"),
+        );
     }
 
     /// Append a completed recovery step to the on-chain audit trail.
@@ -7381,6 +7439,108 @@ impl BridgeWatchContract {
             .persistent()
             .get(&keys::RECOVERY_STEPS)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin Activity Service (issue #299)
+    // -----------------------------------------------------------------------
+
+    /// Retrieve a page of admin activity log entries (oldest-first).
+    ///
+    /// Returns up to `limit` entries starting at zero-indexed `offset`.
+    /// Maximum `limit` per call is 50.
+    pub fn get_admin_activity(env: Env, limit: u32, offset: u32) -> AdminActivityPage {
+        if limit > 50 {
+            panic!("limit must not exceed 50");
+        }
+        let log: Vec<AdminActivityEntry> = env
+            .storage()
+            .persistent()
+            .get(&keys::ADMIN_ACTIVITY_LOG)
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = log.len();
+        let mut page: Vec<AdminActivityEntry> = Vec::new(&env);
+        let end = if offset + limit < total {
+            offset + limit
+        } else {
+            total
+        };
+        for i in offset..end {
+            page.push_back(log.get(i).unwrap());
+        }
+        AdminActivityPage { entries: page, total }
+    }
+
+    /// Retrieve admin activity entries for a specific actor (most-recent first).
+    /// Returns up to `limit` matching entries; maximum is 50.
+    pub fn get_admin_activity_by_actor(
+        env: Env,
+        actor: Address,
+        limit: u32,
+    ) -> Vec<AdminActivityEntry> {
+        if limit > 50 {
+            panic!("limit must not exceed 50");
+        }
+        let log: Vec<AdminActivityEntry> = env
+            .storage()
+            .persistent()
+            .get(&keys::ADMIN_ACTIVITY_LOG)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut result: Vec<AdminActivityEntry> = Vec::new(&env);
+        let len = log.len();
+        let mut i = len;
+        while i > 0 && result.len() < limit {
+            i -= 1;
+            let entry = log.get(i).unwrap();
+            if entry.actor == actor {
+                result.push_back(entry);
+            }
+        }
+        result
+    }
+
+    /// Internal: append one entry to the admin activity log.
+    /// Capped at 500 entries; oldest entries are trimmed when the cap is hit.
+    fn append_admin_activity(
+        env: &Env,
+        action: AdminActivityAction,
+        actor: Address,
+        detail: String,
+    ) {
+        let seq: u32 = env
+            .storage()
+            .instance()
+            .get(&keys::ADMIN_ACTIVITY_CTR)
+            .unwrap_or(0u32)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&keys::ADMIN_ACTIVITY_CTR, &seq);
+        let entry = AdminActivityEntry {
+            sequence: seq,
+            action: action.clone(),
+            actor,
+            detail,
+            timestamp: env.ledger().timestamp(),
+        };
+        let mut log: Vec<AdminActivityEntry> = env
+            .storage()
+            .persistent()
+            .get(&keys::ADMIN_ACTIVITY_LOG)
+            .unwrap_or_else(|| Vec::new(env));
+        log.push_back(entry);
+        if log.len() > 500 {
+            let mut trimmed: Vec<AdminActivityEntry> = Vec::new(env);
+            for i in 1..log.len() {
+                trimmed.push_back(log.get(i).unwrap());
+            }
+            log = trimmed;
+        }
+        env.storage()
+            .persistent()
+            .set(&keys::ADMIN_ACTIVITY_LOG, &log);
+        env.events()
+            .publish((symbol_short!("adm_act"),), (seq, action));
     }
 }
 
@@ -11075,5 +11235,92 @@ mod tests {
         client.enter_recovery_mode(&admin, &String::from_str(&env, "second"));
         let state = client.get_recovery_state();
         assert_eq!(state.step_count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin Activity Service tests (issue #299)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_admin_activity_log_populated_on_recovery_enter() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "incident"));
+        let page = client.get_admin_activity(&1, &0);
+        assert_eq!(page.total, 1);
+        let entry = page.entries.get(0).unwrap();
+        assert_eq!(entry.action, AdminActivityAction::RecoveryEntered);
+        assert_eq!(entry.actor, admin);
+        assert_eq!(entry.sequence, 1);
+    }
+
+    #[test]
+    fn test_admin_activity_log_populated_on_recovery_exit() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "incident"));
+        client.exit_recovery_mode(&admin);
+        let page = client.get_admin_activity(&50, &0);
+        // Should have 2 entries: RecoveryEntered and RecoveryExited
+        assert_eq!(page.total, 2);
+        let last = page.entries.get(1).unwrap();
+        assert_eq!(last.action, AdminActivityAction::RecoveryExited);
+    }
+
+    #[test]
+    fn test_admin_activity_get_by_actor_returns_matching() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "incident"));
+        client.exit_recovery_mode(&admin);
+        let entries = client.get_admin_activity_by_actor(&admin, &10);
+        // Both enter and exit were performed by admin
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_admin_activity_get_by_actor_most_recent_first() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "incident"));
+        client.exit_recovery_mode(&admin);
+        let entries = client.get_admin_activity_by_actor(&admin, &10);
+        // Most recent (RecoveryExited) should come first in the result
+        assert_eq!(entries.get(0).unwrap().action, AdminActivityAction::RecoveryExited);
+        assert_eq!(entries.get(1).unwrap().action, AdminActivityAction::RecoveryEntered);
+    }
+
+    #[test]
+    fn test_admin_activity_pagination_offset() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "i1"));
+        client.exit_recovery_mode(&admin);
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "i2"));
+        client.exit_recovery_mode(&admin);
+        // Total = 4 entries. Fetch page 2 (offset=2, limit=2)
+        let page = client.get_admin_activity(&2, &2);
+        assert_eq!(page.total, 4);
+        assert_eq!(page.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_admin_activity_sequence_monotonically_increases() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "i1"));
+        client.exit_recovery_mode(&admin);
+        let page = client.get_admin_activity(&10, &0);
+        assert_eq!(page.entries.get(0).unwrap().sequence, 1);
+        assert_eq!(page.entries.get(1).unwrap().sequence, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "limit must not exceed 50")]
+    fn test_admin_activity_limit_exceeds_max_panics() {
+        let (_, client, _) = setup();
+        client.get_admin_activity(&51, &0);
+    }
+
+    #[test]
+    fn test_admin_activity_empty_log_returns_zero_total() {
+        let (_, client, _) = setup();
+        let page = client.get_admin_activity(&10, &0);
+        assert_eq!(page.total, 0);
+        assert_eq!(page.entries.len(), 0);
     }
 }
