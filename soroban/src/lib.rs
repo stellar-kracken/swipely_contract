@@ -94,6 +94,12 @@ mod keys {
     pub const ASSET_STATISTICS: &str = "asset_statistics";
     pub const EXPIRATIONPOLICY: &str = "expiration_policy";
     pub const CLEANUPSTATS: &str = "cleanup_stats";
+    // Emergency Recovery (issue #298)
+    pub const RECOVERY_MODE: &str = "recovery_mode";
+    pub const RECOVERY_STEPS: &str = "recovery_steps";
+    pub const RECOVERY_REASON: &str = "recovery_reason";
+    pub const RECOVERY_ENTERED_AT: &str = "recovery_entered_at";
+    pub const RECOVERY_ENTERED_BY: &str = "recovery_entered_by";
 }
 
 #[contracttype]
@@ -933,6 +939,40 @@ pub struct AllConfigsExport {
     pub total: u32,
     /// Ledger timestamp when this export was generated.
     pub exported_at: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Emergency Recovery types (issue #298)
+// ---------------------------------------------------------------------------
+
+/// A single step recorded during an active emergency recovery sequence.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryStep {
+    /// Human-readable description of the action taken.
+    pub description: String,
+    /// Always `true` — steps are only written when completed.
+    pub completed: bool,
+    /// Ledger timestamp when this step was recorded.
+    pub recorded_at: u64,
+    /// Address that recorded the step.
+    pub actor: Address,
+}
+
+/// Summary of the current emergency recovery state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryState {
+    /// Whether recovery mode is currently active.
+    pub active: bool,
+    /// Human-readable reason passed to `enter_recovery_mode`.
+    pub reason: String,
+    /// Ledger timestamp when recovery mode was entered.
+    pub entered_at: u64,
+    /// Address that activated recovery mode.
+    pub entered_by: Address,
+    /// Number of recovery steps logged so far.
+    pub step_count: u32,
 }
 
 #[contract]
@@ -7180,6 +7220,168 @@ impl BridgeWatchContract {
             13. trigger_periodic_stats() - Trigger batch computation",
         )
     }
+
+    // -----------------------------------------------------------------------
+    // Emergency Recovery (issue #298)
+    // -----------------------------------------------------------------------
+
+    /// Enter emergency recovery mode.
+    ///
+    /// Signals that the contract is in a degraded state and operators must
+    /// follow a manual recovery runbook. Only the contract admin may activate
+    /// recovery. The reason is stored on-chain for the audit trail.
+    ///
+    /// # Panics
+    /// - `caller` is not the contract admin.
+    /// - Recovery mode is already active.
+    pub fn enter_recovery_mode(env: Env, caller: Address, reason: String) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&keys::ADMIN).unwrap();
+        if caller != admin {
+            panic!("only admin can enter recovery mode");
+        }
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&keys::RECOVERY_MODE)
+            .unwrap_or(false)
+        {
+            panic!("recovery mode already active");
+        }
+        let now = env.ledger().timestamp();
+        env.storage().instance().set(&keys::RECOVERY_MODE, &true);
+        env.storage().instance().set(&keys::RECOVERY_REASON, &reason);
+        env.storage()
+            .instance()
+            .set(&keys::RECOVERY_ENTERED_AT, &now);
+        env.storage()
+            .instance()
+            .set(&keys::RECOVERY_ENTERED_BY, &caller);
+        // Reset step log for this recovery session
+        let steps: Vec<RecoveryStep> = Vec::new(&env);
+        env.storage()
+            .persistent()
+            .set(&keys::RECOVERY_STEPS, &steps);
+        env.events()
+            .publish((symbol_short!("rec_entr"), caller), (reason, now));
+    }
+
+    /// Exit emergency recovery mode, returning the contract to normal operation.
+    ///
+    /// # Panics
+    /// - `caller` is not the contract admin.
+    /// - Recovery mode is not currently active.
+    pub fn exit_recovery_mode(env: Env, caller: Address) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&keys::ADMIN).unwrap();
+        if caller != admin {
+            panic!("only admin can exit recovery mode");
+        }
+        if !env
+            .storage()
+            .instance()
+            .get::<_, bool>(&keys::RECOVERY_MODE)
+            .unwrap_or(false)
+        {
+            panic!("recovery mode is not active");
+        }
+        let now = env.ledger().timestamp();
+        env.storage().instance().set(&keys::RECOVERY_MODE, &false);
+        env.events()
+            .publish((symbol_short!("rec_exit"), caller), now);
+    }
+
+    /// Append a completed recovery step to the on-chain audit trail.
+    ///
+    /// Steps are immutable once written and serve as an ordered record of
+    /// actions taken during the recovery session. Capped at 50 steps per
+    /// session (reset when recovery mode is re-entered).
+    ///
+    /// # Panics
+    /// - `caller` is not the contract admin.
+    /// - Recovery mode is not currently active.
+    /// - The step log is already at 50 entries.
+    pub fn record_recovery_step(env: Env, caller: Address, description: String) {
+        caller.require_auth();
+        let admin: Address = env.storage().instance().get(&keys::ADMIN).unwrap();
+        if caller != admin {
+            panic!("only admin can record recovery steps");
+        }
+        if !env
+            .storage()
+            .instance()
+            .get::<_, bool>(&keys::RECOVERY_MODE)
+            .unwrap_or(false)
+        {
+            panic!("recovery mode is not active");
+        }
+        let mut steps: Vec<RecoveryStep> = env
+            .storage()
+            .persistent()
+            .get(&keys::RECOVERY_STEPS)
+            .unwrap_or_else(|| Vec::new(&env));
+        if steps.len() >= 50 {
+            panic!("recovery step log is full (max 50)");
+        }
+        let step = RecoveryStep {
+            description,
+            completed: true,
+            recorded_at: env.ledger().timestamp(),
+            actor: caller,
+        };
+        steps.push_back(step);
+        env.storage()
+            .persistent()
+            .set(&keys::RECOVERY_STEPS, &steps);
+    }
+
+    /// Return a summary of the current recovery state.
+    ///
+    /// When recovery is not active, `active` is `false` and the `reason`,
+    /// `entered_at`, and `entered_by` fields reflect the last recovery session
+    /// (or zero-values if recovery has never been used).
+    pub fn get_recovery_state(env: Env) -> RecoveryState {
+        let active = env
+            .storage()
+            .instance()
+            .get::<_, bool>(&keys::RECOVERY_MODE)
+            .unwrap_or(false);
+        let steps: Vec<RecoveryStep> = env
+            .storage()
+            .persistent()
+            .get(&keys::RECOVERY_STEPS)
+            .unwrap_or_else(|| Vec::new(&env));
+        let reason: String = env
+            .storage()
+            .instance()
+            .get(&keys::RECOVERY_REASON)
+            .unwrap_or_else(|| String::from_str(&env, ""));
+        let entered_at: u64 = env
+            .storage()
+            .instance()
+            .get(&keys::RECOVERY_ENTERED_AT)
+            .unwrap_or(0);
+        let entered_by: Address = env
+            .storage()
+            .instance()
+            .get(&keys::RECOVERY_ENTERED_BY)
+            .unwrap_or_else(|| env.current_contract_address());
+        RecoveryState {
+            active,
+            reason,
+            entered_at,
+            entered_by,
+            step_count: steps.len(),
+        }
+    }
+
+    /// Return the ordered list of recovery steps recorded in the current session.
+    pub fn get_recovery_steps(env: Env) -> Vec<RecoveryStep> {
+        env.storage()
+            .persistent()
+            .get(&keys::RECOVERY_STEPS)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
 }
 
 #[cfg(test)]
@@ -10767,5 +10969,111 @@ mod tests {
 
         let export = client.get_all_configs();
         assert_eq!(export.total, 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Emergency Recovery tests (issue #298)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_enter_recovery_mode_stores_state() {
+        let (env, client, admin) = setup();
+        let reason = String::from_str(&env, "partial oracle failure");
+        client.enter_recovery_mode(&admin, &reason);
+        let state = client.get_recovery_state();
+        assert!(state.active);
+        assert_eq!(state.reason, reason);
+        assert_eq!(state.entered_by, admin);
+        assert_eq!(state.step_count, 0);
+    }
+
+    #[test]
+    fn test_exit_recovery_mode_clears_flag() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "incident"));
+        client.exit_recovery_mode(&admin);
+        let state = client.get_recovery_state();
+        assert!(!state.active);
+    }
+
+    #[test]
+    fn test_record_recovery_step_appends_to_log() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "incident"));
+        let desc = String::from_str(&env, "reverted oracle config");
+        client.record_recovery_step(&admin, &desc);
+        let state = client.get_recovery_state();
+        assert_eq!(state.step_count, 1);
+        let steps = client.get_recovery_steps();
+        assert_eq!(steps.len(), 1);
+        let step = steps.get(0).unwrap();
+        assert_eq!(step.description, desc);
+        assert!(step.completed);
+        assert_eq!(step.actor, admin);
+    }
+
+    #[test]
+    fn test_multiple_recovery_steps_ordered() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "incident"));
+        client.record_recovery_step(&admin, &String::from_str(&env, "step one"));
+        client.record_recovery_step(&admin, &String::from_str(&env, "step two"));
+        client.record_recovery_step(&admin, &String::from_str(&env, "step three"));
+        let steps = client.get_recovery_steps();
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps.get(0).unwrap().description, String::from_str(&env, "step one"));
+        assert_eq!(steps.get(2).unwrap().description, String::from_str(&env, "step three"));
+    }
+
+    #[test]
+    #[should_panic(expected = "recovery mode already active")]
+    fn test_enter_recovery_mode_twice_panics() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "r1"));
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "r2"));
+    }
+
+    #[test]
+    #[should_panic(expected = "recovery mode is not active")]
+    fn test_exit_recovery_mode_when_not_active_panics() {
+        let (_, client, admin) = setup();
+        client.exit_recovery_mode(&admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "recovery mode is not active")]
+    fn test_record_step_without_recovery_mode_panics() {
+        let (env, client, admin) = setup();
+        client.record_recovery_step(&admin, &String::from_str(&env, "step"));
+    }
+
+    #[test]
+    fn test_recovery_enter_emits_event() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "incident"));
+        let events = env.events().all();
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn test_recovery_exit_emits_event() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "incident"));
+        client.exit_recovery_mode(&admin);
+        // Both enter and exit emit events; combined log must be non-empty.
+        let events = env.events().all();
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn test_recovery_step_reset_on_reentry() {
+        let (env, client, admin) = setup();
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "first"));
+        client.record_recovery_step(&admin, &String::from_str(&env, "step from first session"));
+        client.exit_recovery_mode(&admin);
+        // Re-enter: step log should be cleared
+        client.enter_recovery_mode(&admin, &String::from_str(&env, "second"));
+        let state = client.get_recovery_state();
+        assert_eq!(state.step_count, 0);
     }
 }
