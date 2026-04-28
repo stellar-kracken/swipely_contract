@@ -21,6 +21,7 @@ pub mod multisig_treasury;
 pub mod rate_limiter;
 #[cfg(test)]
 pub mod reputation_system;
+pub mod source_trust;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, String, Vec,
@@ -98,6 +99,9 @@ mod keys {
     pub const RECOVERY_MODE: &str = "recovery_mode";
     pub const RECOVERY_STEPS: &str = "recovery_steps";
     pub const RECOVERY_REASON: &str = "recovery_reason";
+    // Trusted Source Registry
+    pub const TRUSTED_SOURCE: &str = "trusted_source";
+    pub const ALL_TRUSTED_SOURCES: &str = "all_trusted_sources";
     pub const RECOVERY_ENTERED_AT: &str = "recovery_entered_at";
     pub const RECOVERY_ENTERED_BY: &str = "recovery_entered_by";
     // Admin Activity Service (issue #299)
@@ -1183,6 +1187,9 @@ impl BridgeWatchContract {
     /// `caller` must be the contract admin, a `SuperAdmin`, or a
     /// `HealthSubmitter`. Backward compatible: the original admin address
     /// requires no explicit role assignment.
+    ///
+    /// Additionally, if source trust is enabled, the caller must be a
+    /// registered trusted source.
     pub fn submit_health(
         env: Env,
         caller: Address,
@@ -1194,6 +1201,14 @@ impl BridgeWatchContract {
     ) {
         Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
+        
+        // Check if caller is a trusted source (if any sources are registered)
+        let active_sources = source_trust::get_active_trusted_sources(&env);
+        if active_sources.len() > 0 {
+            // If sources are registered, enforce trust requirement
+            source_trust::require_trusted_source(&env, &caller);
+        }
+        
         let status = Self::load_asset_health(&env, &asset_code);
         Self::assert_asset_accepting_submissions(&status);
         let timestamp = env.ledger().timestamp();
@@ -1295,6 +1310,9 @@ impl BridgeWatchContract {
     /// `PriceSubmitter`. The record is stored as the latest price and
     /// also appended to the asset's historical price series for
     /// time-range queries via [`get_price_history`].
+    ///
+    /// Additionally, if source trust is enabled, the caller must be a
+    /// registered trusted source.
     pub fn submit_price(
         env: Env,
         caller: Address,
@@ -1304,6 +1322,14 @@ impl BridgeWatchContract {
     ) {
         Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::PriceSubmitter);
+        
+        // Check if caller is a trusted source (if any sources are registered)
+        let active_sources = source_trust::get_active_trusted_sources(&env);
+        if active_sources.len() > 0 {
+            // If sources are registered, enforce trust requirement
+            source_trust::require_trusted_source(&env, &caller);
+        }
+        
         let status = Self::load_asset_health(&env, &asset_code);
         Self::assert_asset_accepting_submissions(&status);
         let timestamp = env.ledger().timestamp();
@@ -7998,6 +8024,182 @@ impl BridgeWatchContract {
         env.storage()
             .persistent()
             .set(&keys::EVENT_REPLAY_LOG, &log);
+    }
+
+    // ── Trusted Source Registry ───────────────────────────────────────────────
+
+    /// Register a new trusted source for contract submissions.
+    ///
+    /// Only admin or super admin can register sources. Trusted sources are
+    /// authorized to submit health scores, price updates, and other contract data.
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - The admin performing the registration
+    /// * `source_address` - The address to register as a trusted source
+    /// * `name` - Human-readable name/description for the source
+    ///
+    /// # Panics
+    ///
+    /// * If `caller` is not an admin or super admin
+    /// * If `name` is empty
+    ///
+    /// # Events
+    ///
+    /// Emits a `SourceRegisteredEvent` on success.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// contract.register_trusted_source(
+    ///     env,
+    ///     admin_address,
+    ///     oracle_address,
+    ///     "CoinGecko Price Oracle".into(),
+    /// );
+    /// ```
+    pub fn register_trusted_source(
+        env: Env,
+        caller: Address,
+        source_address: Address,
+        name: String,
+    ) {
+        caller.require_auth();
+        
+        // Check admin permission
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&keys::ADMIN)
+            .unwrap_or_else(|| panic!("contract not initialized"));
+        
+        if caller != admin {
+            acl::require_permission(&env, &caller, &admin, &Permission::ManageConfig);
+        }
+
+        source_trust::register_trusted_source(&env, &caller, &source_address, name);
+    }
+
+    /// Revoke a trusted source, preventing it from making further submissions.
+    ///
+    /// Only admin or super admin can revoke sources. The source record is
+    /// preserved for audit purposes but marked as inactive.
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - The admin performing the revocation
+    /// * `source_address` - The address to revoke
+    ///
+    /// # Panics
+    ///
+    /// * If `caller` is not an admin or super admin
+    /// * If `source_address` is not registered
+    /// * If `source_address` is already revoked
+    ///
+    /// # Events
+    ///
+    /// Emits a `SourceRevokedEvent` on success.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// contract.revoke_trusted_source(env, admin_address, oracle_address);
+    /// ```
+    pub fn revoke_trusted_source(env: Env, caller: Address, source_address: Address) {
+        caller.require_auth();
+        
+        // Check admin permission
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&keys::ADMIN)
+            .unwrap_or_else(|| panic!("contract not initialized"));
+        
+        if caller != admin {
+            acl::require_permission(&env, &caller, &admin, &Permission::ManageConfig);
+        }
+
+        source_trust::revoke_trusted_source(&env, &caller, &source_address);
+    }
+
+    /// Check if an address is currently a trusted source.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_address` - The address to check
+    ///
+    /// # Returns
+    ///
+    /// `true` if the address is registered and active, `false` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let is_trusted = contract.is_trusted_source(env, oracle_address);
+    /// if is_trusted {
+    ///     // Allow submission
+    /// }
+    /// ```
+    pub fn is_trusted_source(env: Env, source_address: Address) -> bool {
+        source_trust::is_trusted_source(&env, &source_address)
+    }
+
+    /// Get detailed information about a trusted source.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_address` - The address to query
+    ///
+    /// # Returns
+    ///
+    /// `Some(TrustedSource)` if the source is registered, `None` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some(source) = contract.get_trusted_source(env, oracle_address) {
+    ///     log!("Source: {}, Active: {}", source.name, source.is_active);
+    /// }
+    /// ```
+    pub fn get_trusted_source(
+        env: Env,
+        source_address: Address,
+    ) -> Option<source_trust::TrustedSource> {
+        source_trust::get_trusted_source(&env, &source_address)
+    }
+
+    /// Get a list of all registered trusted sources (active and revoked).
+    ///
+    /// # Returns
+    ///
+    /// A vector of `SourceInfo` records for all registered sources.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let all_sources = contract.get_all_trusted_sources(env);
+    /// for source in all_sources.iter() {
+    ///     log!("Source: {}, Active: {}", source.name, source.is_active);
+    /// }
+    /// ```
+    pub fn get_all_trusted_sources(env: Env) -> Vec<source_trust::SourceInfo> {
+        source_trust::get_all_trusted_sources(&env)
+    }
+
+    /// Get a list of only active trusted sources.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `SourceInfo` records for active sources only.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let active_sources = contract.get_active_trusted_sources(env);
+    /// log!("Active sources: {}", active_sources.len());
+    /// ```
+    pub fn get_active_trusted_sources(env: Env) -> Vec<source_trust::SourceInfo> {
+        source_trust::get_active_trusted_sources(&env)
     }
 }
 
