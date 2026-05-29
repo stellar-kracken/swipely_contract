@@ -17,6 +17,7 @@ pub mod reputation_system;
 pub mod source_trust;
 
 pub mod rate_limiter;
+pub mod migration;
 
 #[cfg(test)]
 pub mod asset_registry;
@@ -109,6 +110,9 @@ mod keys {
     // Event Replay Helpers (issue #296)
     pub const EVENT_REPLAY_LOG: &str = "event_replay_log";
     pub const EVENT_REPLAY_CTR: &str = "event_replay_ctr";
+    // Contract State Migration (issue #403)
+    pub const MIGRATION_VERSION: &str = "mig_version";
+    pub const MIGRATION_HISTORY: &str = "mig_history";
 }
 
 #[contracttype]
