@@ -67,6 +67,7 @@ pub enum RegistryError {
     AssetDeprecated = 17,
     AssetNotWhitelisted = 18,
     AssetAlreadyWhitelisted = 19,
+    AssetFrozen = 20,
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +274,22 @@ pub struct MetadataVersion {
     pub timestamp: u64,
 }
 
+/// Frozen asset state for preventing updates.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrozenAsset {
+    /// Asset code that is frozen.
+    pub asset_code: String,
+    /// Whether the asset is currently frozen.
+    pub is_frozen: bool,
+    /// Admin who initiated the freeze.
+    pub frozen_by: Address,
+    /// Timestamp when frozen.
+    pub frozen_at: u64,
+    /// Reason for freezing.
+    pub freeze_reason: String,
+}
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -303,6 +320,8 @@ pub enum DataKey {
     StatusIndex(AssetStatus),
     /// Whitelist of permitted asset codes (Vec<String>). Admin-only writes.
     Whitelist,
+    /// Frozen state for an asset (FrozenAsset).
+    Frozen(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +507,11 @@ impl AssetRegistryContract {
         Self::require_admin(&env, &admin)?;
 
         let mut metadata = Self::get_asset_or_err(&env, &asset_code)?;
+
+        // Cannot update frozen assets
+        if Self::is_asset_frozen(&env, asset_code.clone()) {
+            return Err(RegistryError::AssetFrozen);
+        }
 
         // Cannot update deprecated assets
         if metadata.status == AssetStatus::Deprecated {
@@ -989,6 +1013,87 @@ impl AssetRegistryContract {
             .instance()
             .get(&DataKey::Whitelist)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // =======================================================================
+    // Frozen asset controls
+    // =======================================================================
+
+    /// Freeze an asset to prevent updates (admin only).
+    pub fn freeze_asset(
+        env: Env,
+        admin: Address,
+        asset_code: String,
+        reason: String,
+    ) -> Result<(), RegistryError> {
+        Self::require_admin(&env, &admin)?;
+        Self::require_asset_exists(&env, &asset_code)?;
+
+        let now = env.ledger().timestamp();
+        let frozen_asset = FrozenAsset {
+            asset_code: asset_code.clone(),
+            is_frozen: true,
+            frozen_by: admin,
+            frozen_at: now,
+            freeze_reason: reason,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Frozen(asset_code.clone()), &frozen_asset);
+
+        env.events()
+            .publish((symbol_short!("ar_frz"), asset_code), 1u32);
+
+        Ok(())
+    }
+
+    /// Unfreeze an asset to allow updates (admin only).
+    pub fn unfreeze_asset(
+        env: Env,
+        admin: Address,
+        asset_code: String,
+    ) -> Result<(), RegistryError> {
+        Self::require_admin(&env, &admin)?;
+        Self::require_asset_exists(&env, &asset_code)?;
+
+        let now = env.ledger().timestamp();
+        let frozen_asset = FrozenAsset {
+            asset_code: asset_code.clone(),
+            is_frozen: false,
+            frozen_by: admin,
+            frozen_at: now,
+            freeze_reason: String::from_str(&env, "Unfrozen"),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Frozen(asset_code.clone()), &frozen_asset);
+
+        env.events()
+            .publish((symbol_short!("ar_unfr"), asset_code), 1u32);
+
+        Ok(())
+    }
+
+    /// Check if an asset is currently frozen. Public read.
+    pub fn is_asset_frozen(env: Env, asset_code: String) -> bool {
+        let frozen: Option<FrozenAsset> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Frozen(asset_code));
+
+        match frozen {
+            Some(f) => f.is_frozen,
+            None => false,
+        }
+    }
+
+    /// Get the frozen state of an asset. Public read.
+    pub fn get_frozen_state(env: Env, asset_code: String) -> Option<FrozenAsset> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Frozen(asset_code))
     }
 
     // =======================================================================
@@ -2264,5 +2369,116 @@ mod tests {
             client.get_assets_by_category(&AssetCategory::Native).len(),
             1
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Frozen asset controls
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_freeze_asset() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        assert!(!client.is_asset_frozen(&asset_code));
+
+        client.freeze_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Unsafe asset detected"),
+        );
+
+        assert!(client.is_asset_frozen(&asset_code));
+    }
+
+    #[test]
+    fn test_freeze_asset_state() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        let reason = String::from_str(&env, "Deprecated");
+        client.freeze_asset(&admin, &asset_code, &reason);
+
+        let frozen_state = client.get_frozen_state(&asset_code).unwrap();
+        assert!(frozen_state.is_frozen);
+        assert_eq!(frozen_state.freeze_reason, reason);
+        assert_eq!(frozen_state.frozen_by, admin);
+    }
+
+    #[test]
+    fn test_unfreeze_asset() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        client.freeze_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Temporary freeze"),
+        );
+        assert!(client.is_asset_frozen(&asset_code));
+
+        client.unfreeze_asset(&admin, &asset_code);
+        assert!(!client.is_asset_frozen(&asset_code));
+    }
+
+    #[test]
+    fn test_update_metadata_frozen_fails() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        client.freeze_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Asset frozen"),
+        );
+
+        let result = client.try_update_metadata(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "New Name"),
+            &String::from_str(&env, "USDC"),
+            &String::from_str(&env, "circle.com"),
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "url"),
+            &String::from_str(&env, "reason"),
+        );
+        assert_eq!(result, Err(Ok(RegistryError::AssetFrozen)));
+    }
+
+    #[test]
+    fn test_freeze_nonexistent_asset() {
+        let (env, client, admin) = setup();
+
+        let result = client.try_freeze_asset(
+            &admin,
+            &String::from_str(&env, "FAKE"),
+            &String::from_str(&env, "reason"),
+        );
+        assert_eq!(result, Err(Ok(RegistryError::AssetNotFound)));
+    }
+
+    #[test]
+    fn test_freeze_non_admin_fails() {
+        let (env, client, admin) = setup();
+        let stranger = Address::generate(&env);
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        let result = client.try_freeze_asset(
+            &stranger,
+            &asset_code,
+            &String::from_str(&env, "reason"),
+        );
+        assert_eq!(result, Err(Ok(RegistryError::NotAuthorized)));
+    }
+
+    #[test]
+    fn test_get_frozen_state_unfrozen() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        let state = client.get_frozen_state(&asset_code);
+        assert!(state.is_none());
+
+        assert!(!client.is_asset_frozen(&asset_code));
     }
 }
