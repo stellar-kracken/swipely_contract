@@ -1,15 +1,9 @@
 //! # State Export Functions
 //!
 //! Provides compact, exportable views of contract state for off-chain sync and auditing.
-//!
-//! ## Features
-//! - Deterministic state snapshots
-//! - Minimal payloads
-//! - Stable schema versioning
-//! - Read-only access
-//! - Off-chain compatibility
 
-use soroban_sdk::{contracttype, Address, Env, String, Vec};
+use crate::AssetHealth;
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Vec};
 
 /// Version marker for state export compatibility.
 pub const STATE_EXPORT_VERSION: u32 = 1;
@@ -24,7 +18,7 @@ pub struct StateExport {
     pub exported_at: u64,
     /// Contract address generating the export.
     pub contract_address: Address,
-    /// Compact state payload (deterministic).
+    /// Compact state payload (deterministic SHA-256 hex digest).
     pub state_hash: String,
     /// Summary metadata.
     pub metadata: ExportMetadata,
@@ -73,38 +67,102 @@ pub struct AssetStateSnapshot {
 }
 
 /// Export helper for building state snapshots.
-pub struct StateExportHelper {
-    env: Env,
-}
+pub struct StateExportHelper;
 
 impl StateExportHelper {
-    /// Create a new state export helper.
-    pub fn new(env: Env) -> Self {
-        StateExportHelper { env }
+    /// Build a compact asset snapshot from on-chain health data.
+    pub fn build_asset_snapshot_from_health(env: &Env, health: &AssetHealth) -> AssetStateSnapshot {
+        let status = if !health.active {
+            String::from_str(env, "Inactive")
+        } else if health.paused {
+            String::from_str(env, "Paused")
+        } else {
+            String::from_str(env, "Active")
+        };
+
+        AssetStateSnapshot {
+            asset_code: health.asset_code.clone(),
+            status,
+            compliance: String::from_str(env, "Unknown"),
+            risk_rating: Self::risk_rating_for_score(env, health.health_score),
+            risk_score_bps: health.health_score.saturating_mul(100),
+            chain_count: 0,
+            oracle_feed_count: 0,
+            bridge_count: 0,
+            pool_count: 0,
+            is_frozen: health.paused,
+            updated_at: health.timestamp,
+        }
     }
 
-    /// Generate deterministic state hash for audit trail.
-    pub fn compute_state_hash(
-        env: Env,
-        asset_code: &String,
-        status: &String,
-        risk_score: u32,
-        timestamp: u64,
-    ) -> String {
-        let mut hash_input = String::from_str(&env, "");
-        hash_input = String::from_str(&env, &format!("{}{}{}{}", asset_code, status, risk_score, timestamp));
-        hash_input
+    /// Build a placeholder snapshot when no health record exists yet.
+    pub fn build_empty_asset_snapshot(env: &Env, asset_code: String) -> AssetStateSnapshot {
+        AssetStateSnapshot {
+            asset_code,
+            status: String::from_str(env, "Unknown"),
+            compliance: String::from_str(env, "Unknown"),
+            risk_rating: String::from_str(env, "Unknown"),
+            risk_score_bps: 0,
+            chain_count: 0,
+            oracle_feed_count: 0,
+            bridge_count: 0,
+            pool_count: 0,
+            is_frozen: false,
+            updated_at: 0,
+        }
     }
 
-    /// Create a state export snapshot.
-    pub fn create_export(
-        env: Env,
+    /// Sort snapshots by asset code for stable ordering.
+    pub fn sort_snapshots(env: &Env, snapshots: &mut Vec<AssetStateSnapshot>) {
+        let len = snapshots.len();
+        if len <= 1 {
+            return;
+        }
+
+        let mut i = 0;
+        while i < len {
+            let mut j = i + 1;
+            while j < len {
+                let left = snapshots.get(i).unwrap();
+                let right = snapshots.get(j).unwrap();
+                if Self::asset_code_less_than(&left.asset_code, &right.asset_code) {
+                    snapshots.set(i, right);
+                    snapshots.set(j, left.clone());
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+
+        let _ = env;
+    }
+
+    /// Compute deterministic SHA-256 hash over the export payload.
+    pub fn compute_snapshots_hash(env: &Env, snapshots: &Vec<AssetStateSnapshot>) -> String {
+        let mut data = Bytes::new(env);
+        Self::append_u32(&mut data, STATE_EXPORT_VERSION);
+        Self::append_u32(&mut data, snapshots.len());
+
+        for snapshot in snapshots.iter() {
+            Self::append_snapshot(&mut data, &snapshot);
+        }
+
+        let digest: BytesN<32> = env.crypto().sha256(&data).into();
+        Self::hash_to_hex(env, &digest)
+    }
+
+    /// Assemble the top-level export envelope.
+    pub fn assemble_export(
+        env: &Env,
         contract_address: Address,
-        state_hash: String,
-        item_count: u32,
-        notes: String,
+        snapshots: Vec<AssetStateSnapshot>,
     ) -> StateExport {
+        let mut ordered = snapshots;
+        Self::sort_snapshots(env, &mut ordered);
+        let item_count = ordered.len();
+        let state_hash = Self::compute_snapshots_hash(env, &ordered);
         let now = env.ledger().timestamp();
+
         StateExport {
             version: STATE_EXPORT_VERSION,
             exported_at: now,
@@ -112,46 +170,135 @@ impl StateExportHelper {
             state_hash,
             metadata: ExportMetadata {
                 item_count,
-                size_estimate_bytes: item_count * 256,
+                size_estimate_bytes: item_count.saturating_mul(256),
                 compression_level: 0,
-                notes,
+                notes: String::from_str(env, "contract-data-snapshot"),
             },
         }
     }
 
-    /// Create asset state snapshot for export.
-    pub fn snapshot_asset_state(
-        asset_code: String,
-        status: String,
-        compliance: String,
-        risk_rating: String,
-        risk_score_bps: u32,
-        chain_count: u32,
-        oracle_feed_count: u32,
-        bridge_count: u32,
-        pool_count: u32,
-        is_frozen: bool,
-        updated_at: u64,
-    ) -> AssetStateSnapshot {
-        AssetStateSnapshot {
-            asset_code,
-            status,
-            compliance,
-            risk_rating,
-            risk_score_bps,
-            chain_count,
-            oracle_feed_count,
-            bridge_count,
-            pool_count,
-            is_frozen,
-            updated_at,
+    fn risk_rating_for_score(env: &Env, health_score: u32) -> String {
+        if health_score >= 80 {
+            String::from_str(env, "Low")
+        } else if health_score >= 60 {
+            String::from_str(env, "Medium")
+        } else if health_score >= 40 {
+            String::from_str(env, "High")
+        } else {
+            String::from_str(env, "Critical")
         }
     }
-}
 
-// ===========================================================================
-// Tests
-// ===========================================================================
+    fn asset_code_less_than(left: &String, right: &String) -> bool {
+        Self::compare_strings(left, right) > 0
+    }
+
+    /// Lexicographic string comparison for stable asset ordering.
+    pub fn compare_strings(left: &String, right: &String) -> i32 {
+        let left_len = left.len() as usize;
+        let right_len = right.len() as usize;
+        let max_len = if left_len > right_len {
+            left_len
+        } else {
+            right_len
+        }
+        .min(256);
+
+        let mut left_buf = [0u8; 256];
+        let mut right_buf = [0u8; 256];
+        if left_len > 0 {
+            left.copy_into_slice(&mut left_buf[..left_len.min(256)]);
+        }
+        if right_len > 0 {
+            right.copy_into_slice(&mut right_buf[..right_len.min(256)]);
+        }
+
+        let mut idx = 0;
+        while idx < max_len {
+            let left_byte = if idx < left_len {
+                left_buf[idx]
+            } else {
+                0
+            };
+            let right_byte = if idx < right_len {
+                right_buf[idx]
+            } else {
+                0
+            };
+
+            if left_byte != right_byte {
+                return if left_byte > right_byte { 1 } else { -1 };
+            }
+            idx += 1;
+        }
+
+        0
+    }
+
+    fn append_snapshot(buf: &mut Bytes, snapshot: &AssetStateSnapshot) {
+        Self::append_string(buf, &snapshot.asset_code);
+        Self::append_string(buf, &snapshot.status);
+        Self::append_string(buf, &snapshot.compliance);
+        Self::append_string(buf, &snapshot.risk_rating);
+        Self::append_u32(buf, snapshot.risk_score_bps);
+        Self::append_u32(buf, snapshot.chain_count);
+        Self::append_u32(buf, snapshot.oracle_feed_count);
+        Self::append_u32(buf, snapshot.bridge_count);
+        Self::append_u32(buf, snapshot.pool_count);
+        Self::append_bool(buf, snapshot.is_frozen);
+        Self::append_u64(buf, snapshot.updated_at);
+    }
+
+    fn append_u32(buf: &mut Bytes, value: u32) {
+        let bytes = value.to_be_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            buf.push_back(bytes[i]);
+            i += 1;
+        }
+    }
+
+    fn append_u64(buf: &mut Bytes, value: u64) {
+        let bytes = value.to_be_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            buf.push_back(bytes[i]);
+            i += 1;
+        }
+    }
+
+    fn append_bool(buf: &mut Bytes, value: bool) {
+        buf.push_back(if value { 1 } else { 0 });
+    }
+
+    fn append_string(buf: &mut Bytes, value: &String) {
+        let len = value.len() as usize;
+        let safe_len = len.min(256);
+        let mut raw = [0u8; 256];
+        if safe_len > 0 {
+            value.copy_into_slice(&mut raw[..safe_len]);
+        }
+        Self::append_u32(buf, len as u32);
+        let mut idx = 0;
+        while idx < safe_len {
+            buf.push_back(raw[idx]);
+            idx += 1;
+        }
+    }
+
+    fn hash_to_hex(env: &Env, digest: &BytesN<32>) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let bytes = digest.to_array();
+        let mut out = [0u8; 64];
+        let mut i = 0;
+        while i < bytes.len() {
+            out[i * 2] = HEX[(bytes[i] >> 4) as usize];
+            out[i * 2 + 1] = HEX[(bytes[i] & 0x0f) as usize];
+            i += 1;
+        }
+        String::from_bytes(env, &out)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -159,77 +306,90 @@ mod tests {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
+    fn sample_health(env: &Env, code: &str, score: u32, paused: bool, active: bool) -> AssetHealth {
+        AssetHealth {
+            asset_code: String::from_str(env, code),
+            health_score: score,
+            liquidity_score: score,
+            price_stability_score: score,
+            bridge_uptime_score: score,
+            paused,
+            active,
+            timestamp: 1_000,
+            expires_at: 2_000,
+        }
+    }
+
     #[test]
     fn test_state_export_version() {
         assert_eq!(STATE_EXPORT_VERSION, 1);
     }
 
     #[test]
-    fn test_create_export_snapshot() {
+    fn test_build_asset_snapshot_from_health() {
         let env = Env::default();
-        let contract = Address::generate(&env);
-        let hash = String::from_str(&env, "abc123");
-        let notes = String::from_str(&env, "Daily export");
+        let health = sample_health(&env, "USDC", 85, false, true);
+        let snapshot = StateExportHelper::build_asset_snapshot_from_health(&env, &health);
 
-        let export = StateExportHelper::create_export(&env, contract.clone(), hash.clone(), 42, notes.clone());
-
-        assert_eq!(export.version, STATE_EXPORT_VERSION);
-        assert_eq!(export.contract_address, contract);
-        assert_eq!(export.state_hash, hash);
-        assert_eq!(export.metadata.item_count, 42);
-        assert_eq!(export.metadata.notes, notes);
-    }
-
-    #[test]
-    fn test_asset_state_snapshot() {
-        let env = Env::default();
-        let asset_code = String::from_str(&env, "USDC");
-        let status = String::from_str(&env, "Active");
-        let compliance = String::from_str(&env, "Compliant");
-        let risk = String::from_str(&env, "Low");
-
-        let snapshot = StateExportHelper::snapshot_asset_state(
-            asset_code.clone(),
-            status.clone(),
-            compliance.clone(),
-            risk.clone(),
-            1_500,
-            3,
-            2,
-            1,
-            2,
-            false,
-            1_000_000,
-        );
-
-        assert_eq!(snapshot.asset_code, asset_code);
-        assert_eq!(snapshot.status, status);
-        assert_eq!(snapshot.risk_score_bps, 1_500);
-        assert_eq!(snapshot.chain_count, 3);
+        assert_eq!(snapshot.asset_code, health.asset_code);
+        assert_eq!(snapshot.risk_score_bps, 8_500);
+        assert_eq!(snapshot.risk_rating, String::from_str(&env, "Low"));
         assert!(!snapshot.is_frozen);
     }
 
     #[test]
-    fn test_compute_state_hash() {
+    fn test_sort_snapshots_is_stable_by_asset_code() {
         let env = Env::default();
-        let asset_code = String::from_str(&env, "USDC");
-        let status = String::from_str(&env, "Active");
+        let mut snapshots = Vec::new(&env);
+        snapshots.push_back(StateExportHelper::build_empty_asset_snapshot(
+            &env,
+            String::from_str(&env, "USDC"),
+        ));
+        snapshots.push_back(StateExportHelper::build_empty_asset_snapshot(
+            &env,
+            String::from_str(&env, "EURC"),
+        ));
+        snapshots.push_back(StateExportHelper::build_empty_asset_snapshot(
+            &env,
+            String::from_str(&env, "BTC"),
+        ));
 
-        let hash = StateExportHelper::compute_state_hash(&env, &asset_code, &status, 5_000, 1_000_000);
-        assert!(!hash.is_empty());
+        StateExportHelper::sort_snapshots(&env, &mut snapshots);
+
+        assert_eq!(snapshots.get(0).unwrap().asset_code, String::from_str(&env, "BTC"));
+        assert_eq!(snapshots.get(1).unwrap().asset_code, String::from_str(&env, "EURC"));
+        assert_eq!(snapshots.get(2).unwrap().asset_code, String::from_str(&env, "USDC"));
     }
 
     #[test]
-    fn test_metadata_size_estimate() {
+    fn test_compute_snapshots_hash_is_deterministic() {
         let env = Env::default();
-        let export = StateExportHelper::create_export(
-            env,
-            Address::generate(&env),
-            String::from_str(&env, "hash"),
-            100,
-            String::from_str(&env, "test"),
-        );
+        let mut snapshots = Vec::new(&env);
+        snapshots.push_back(StateExportHelper::build_asset_snapshot_from_health(
+            &env,
+            &sample_health(&env, "USDC", 90, false, true),
+        ));
 
-        assert_eq!(export.metadata.size_estimate_bytes, 25_600); // 100 * 256
+        let first = StateExportHelper::compute_snapshots_hash(&env, &snapshots);
+        let second = StateExportHelper::compute_snapshots_hash(&env, &snapshots);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+    }
+
+    #[test]
+    fn test_assemble_export_metadata() {
+        let env = Env::default();
+        let contract = Address::generate(&env);
+        let mut snapshots = Vec::new(&env);
+        snapshots.push_back(StateExportHelper::build_asset_snapshot_from_health(
+            &env,
+            &sample_health(&env, "USDC", 75, false, true),
+        ));
+
+        let export = StateExportHelper::assemble_export(&env, contract.clone(), snapshots);
+        assert_eq!(export.version, STATE_EXPORT_VERSION);
+        assert_eq!(export.contract_address, contract);
+        assert_eq!(export.metadata.item_count, 1);
+        assert!(!export.state_hash.is_empty());
     }
 }
