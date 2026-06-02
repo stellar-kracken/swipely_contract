@@ -68,6 +68,12 @@ pub enum RegistryError {
     AssetNotWhitelisted = 18,
     AssetAlreadyWhitelisted = 19,
     AssetFrozen = 20,
+    /// Attempted to deactivate an asset that is already in a non-restorable state or already active.
+    /// Deactivation is only valid for Active assets. Check the asset's current status.
+    AssetAlreadyActive = 21,
+    /// Attempted to restore an asset that is not in a Deactivated state.
+    /// Only deactivated assets can be restored. Use the asset's current status to determine next actions.
+    AssetNotDeactivated = 22,
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +110,8 @@ pub enum AssetStatus {
     Deprecated,
     /// Asset is pending review before activation.
     PendingReview,
+    /// Asset has been deactivated; awaiting restoration. All historical data is preserved.
+    Deactivated,
 }
 
 /// Compliance status for regulatory tracking.
@@ -634,6 +642,8 @@ impl AssetRegistryContract {
                 | (AssetStatus::Paused, AssetStatus::Active)
                 | (AssetStatus::Active, AssetStatus::Deprecated)
                 | (AssetStatus::Paused, AssetStatus::Deprecated)
+                | (AssetStatus::Active, AssetStatus::Deactivated)
+                | (AssetStatus::Paused, AssetStatus::Deactivated)
         );
         if !valid {
             return Err(RegistryError::InvalidLifecycleTransition);
@@ -668,8 +678,156 @@ impl AssetRegistryContract {
     }
 
     // =======================================================================
-    // Compliance tracking
+    // Asset deactivation and restoration
     // =======================================================================
+
+    /// Deactivate an active asset while preserving all historical data (admin only).
+    ///
+    /// Transitions an asset from Active to Deactivated state, recording the change in version
+    /// history. All asset metadata, chain links, compliance records, oracle feeds, and other
+    /// associations are preserved intact. A deactivated asset can be restored at any time
+    /// via [`restore_asset`].
+    ///
+    /// # Arguments
+    /// * `env` — the contract environment
+    /// * `admin` — the caller, must be the contract admin
+    /// * `asset_code` — unique identifier for the asset to deactivate
+    /// * `reason` — human-readable explanation for deactivation
+    ///
+    /// # Returns
+    /// `Ok(())` if deactivation succeeds, or an error:
+    /// - `NotAuthorized` if caller is not admin
+    /// - `AssetNotFound` if the asset_code does not exist
+    /// - `AssetAlreadyActive` if the asset is not currently Active (already deactivated, paused, deprecated, or pending)
+    ///
+    /// # Events
+    /// Emits `(symbol_short!("asset_deact"), asset_code)` with admin address data.
+    ///
+    /// # State Continuity
+    /// All metadata fields except `status`, `version`, and `updated_at` are preserved unchanged.
+    /// The deactivation is recorded as a new version entry in the asset's history.
+    pub fn deactivate_asset(
+        env: Env,
+        admin: Address,
+        asset_code: String,
+        reason: String,
+    ) -> Result<(), RegistryError> {
+        Self::require_admin(&env, &admin)?;
+        let mut metadata = Self::get_asset_or_err(&env, &asset_code)?;
+
+        // Verify asset is currently Active (only Active assets can be deactivated)
+        if metadata.status != AssetStatus::Active {
+            return Err(RegistryError::AssetAlreadyActive);
+        }
+
+        // Update status indices: remove from Active, add to Deactivated
+        Self::remove_from_index(
+            &env,
+            &DataKey::StatusIndex(AssetStatus::Active),
+            &asset_code,
+        );
+        Self::add_to_index(
+            &env,
+            &DataKey::StatusIndex(AssetStatus::Deactivated),
+            &asset_code,
+        );
+
+        // Transition to Deactivated status
+        metadata.status = AssetStatus::Deactivated;
+        metadata.version += 1;
+        metadata.updated_at = env.ledger().timestamp();
+
+        // Save with version tracking
+        Self::save_with_version(
+            &env,
+            &asset_code,
+            &metadata,
+            &admin,
+            &reason,
+            metadata.updated_at,
+        );
+
+        // Emit deactivation event
+        env.events()
+            .publish((symbol_short!("asset_deact"), asset_code.clone()), admin);
+
+        Ok(())
+    }
+
+    /// Restore a deactivated asset to Active state (admin only).
+    ///
+    /// Transitions an asset from Deactivated back to Active state, preserving all historical
+    /// metadata, chain links, compliance records, oracle feeds, and other associations.
+    /// The restoration is recorded as a new version entry.
+    ///
+    /// # Arguments
+    /// * `env` — the contract environment
+    /// * `admin` — the caller, must be the contract admin
+    /// * `asset_code` — unique identifier for the asset to restore
+    ///
+    /// # Returns
+    /// `Ok(())` if restoration succeeds, or an error:
+    /// - `NotAuthorized` if caller is not admin
+    /// - `AssetNotFound` if the asset_code does not exist
+    /// - `AssetNotDeactivated` if the asset is not currently Deactivated (e.g. already Active, Paused, Deprecated)
+    ///
+    /// # Events
+    /// Emits `(symbol_short!("asset_rest"), asset_code)` with admin address data.
+    ///
+    /// # State Continuity
+    /// All metadata fields except `status`, `version`, and `updated_at` are restored unchanged.
+    /// The entire asset history, including the deactivation event and prior versions, remains intact.
+    pub fn restore_asset(
+        env: Env,
+        admin: Address,
+        asset_code: String,
+    ) -> Result<(), RegistryError> {
+        Self::require_admin(&env, &admin)?;
+        let mut metadata = Self::get_asset_or_err(&env, &asset_code)?;
+
+        // Verify asset is currently Deactivated (only Deactivated assets can be restored)
+        if metadata.status != AssetStatus::Deactivated {
+            return Err(RegistryError::AssetNotDeactivated);
+        }
+
+        // Update status indices: remove from Deactivated, add to Active
+        Self::remove_from_index(
+            &env,
+            &DataKey::StatusIndex(AssetStatus::Deactivated),
+            &asset_code,
+        );
+        Self::add_to_index(
+            &env,
+            &DataKey::StatusIndex(AssetStatus::Active),
+            &asset_code,
+        );
+
+        // Transition to Active status
+        metadata.status = AssetStatus::Active;
+        metadata.version += 1;
+        metadata.updated_at = env.ledger().timestamp();
+
+        // Save with version tracking
+        let reason = String::from_str(&env, "Asset restored");
+        Self::save_with_version(
+            &env,
+            &asset_code,
+            &metadata,
+            &admin,
+            &reason,
+            metadata.updated_at,
+        );
+
+        // Emit restoration event
+        env.events()
+            .publish((symbol_short!("asset_rest"), asset_code.clone()), admin);
+
+        Ok(())
+    }
+
+    // =======================================================================
+    // Compliance tracking
+    // ======================================================================="
 
     /// Update compliance status and add a compliance record (admin only).
     #[allow(clippy::too_many_arguments)]
@@ -1699,6 +1857,294 @@ mod tests {
             &String::from_str(&env, "reason"),
         );
         assert_eq!(result, Err(Ok(RegistryError::AssetDeprecated)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Asset deactivation and restoration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_deactivate_asset_happy_path() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        client.update_status(&admin, &asset_code, &AssetStatus::Active);
+
+        // Verify asset is active before deactivation
+        let meta = client.get_asset(&asset_code).unwrap();
+        assert_eq!(meta.status, AssetStatus::Active);
+        let version_before = meta.version;
+
+        // Deactivate the asset
+        client.deactivate_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Temporary suspension"),
+        );
+
+        // Verify asset is now deactivated
+        let meta = client.get_asset(&asset_code).unwrap();
+        assert_eq!(meta.status, AssetStatus::Deactivated);
+        assert_eq!(meta.version, version_before + 1);
+
+        // Verify it appears in the Deactivated index
+        let deactivated = client.get_assets_by_status(&AssetStatus::Deactivated);
+        assert_eq!(deactivated.len(), 1);
+        assert_eq!(deactivated.get(0).unwrap(), asset_code);
+    }
+
+    #[test]
+    fn test_restore_asset_happy_path() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        // Setup: activate and deactivate
+        client.update_status(&admin, &asset_code, &AssetStatus::Active);
+        client.deactivate_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Temporary suspension"),
+        );
+
+        // Verify deactivated
+        let meta = client.get_asset(&asset_code).unwrap();
+        assert_eq!(meta.status, AssetStatus::Deactivated);
+        let version_before = meta.version;
+
+        // Restore the asset
+        client.restore_asset(&admin, &asset_code);
+
+        // Verify restored to Active
+        let meta = client.get_asset(&asset_code).unwrap();
+        assert_eq!(meta.status, AssetStatus::Active);
+        assert_eq!(meta.version, version_before + 1);
+
+        // Verify it appears in the Active index
+        let active = client.get_assets_by_status(&AssetStatus::Active);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active.get(0).unwrap(), asset_code);
+    }
+
+    #[test]
+    fn test_deactivate_non_active_asset_fails() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        // Do not activate; asset is still PendingReview
+        let result = client.try_deactivate_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Unexpected deactivation"),
+        );
+        assert_eq!(result, Err(Ok(RegistryError::AssetAlreadyActive)));
+    }
+
+    #[test]
+    fn test_restore_non_deactivated_asset_fails() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        // Activate the asset
+        client.update_status(&admin, &asset_code, &AssetStatus::Active);
+
+        // Try to restore an Active (not Deactivated) asset
+        let result = client.try_restore_asset(&admin, &asset_code);
+        assert_eq!(result, Err(Ok(RegistryError::AssetNotDeactivated)));
+    }
+
+    #[test]
+    fn test_deactivate_nonexistent_asset_fails() {
+        let (env, client, admin) = setup();
+        let nonexistent = String::from_str(&env, "FAKE");
+
+        let result = client.try_deactivate_asset(
+            &admin,
+            &nonexistent,
+            &String::from_str(&env, "Attempt"),
+        );
+        assert_eq!(result, Err(Ok(RegistryError::AssetNotFound)));
+    }
+
+    #[test]
+    fn test_restore_nonexistent_asset_fails() {
+        let (env, client, admin) = setup();
+        let nonexistent = String::from_str(&env, "FAKE");
+
+        let result = client.try_restore_asset(&admin, &nonexistent);
+        assert_eq!(result, Err(Ok(RegistryError::AssetNotFound)));
+    }
+
+    #[test]
+    fn test_deactivate_unauthorized_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, AssetRegistryContract);
+        let client = AssetRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+
+        client.initialize(&admin);
+        let asset_code = register_usdc(&env, &client, &admin);
+        client.update_status(&admin, &asset_code, &AssetStatus::Active);
+
+        // Try to deactivate from unauthorized address
+        let result = client.try_deactivate_asset(
+            &unauthorized,
+            &asset_code,
+            &String::from_str(&env, "Unauthorized"),
+        );
+        assert!(result.is_err());
+
+        // Verify asset remains active (no state change)
+        let meta = client.get_asset(&asset_code).unwrap();
+        assert_eq!(meta.status, AssetStatus::Active);
+    }
+
+    #[test]
+    fn test_restore_unauthorized_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, AssetRegistryContract);
+        let client = AssetRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+
+        client.initialize(&admin);
+        let asset_code = register_usdc(&env, &client, &admin);
+        client.update_status(&admin, &asset_code, &AssetStatus::Active);
+        client.deactivate_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Temporary"),
+        );
+
+        // Try to restore from unauthorized address
+        let result = client.try_restore_asset(&unauthorized, &asset_code);
+        assert!(result.is_err());
+
+        // Verify asset remains deactivated (no state change)
+        let meta = client.get_asset(&asset_code).unwrap();
+        assert_eq!(meta.status, AssetStatus::Deactivated);
+    }
+
+    #[test]
+    fn test_deactivate_restore_idempotency() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        client.update_status(&admin, &asset_code, &AssetStatus::Active);
+
+        // First cycle: deactivate and restore
+        client.deactivate_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "First deactivation"),
+        );
+        client.restore_asset(&admin, &asset_code);
+
+        let meta1 = client.get_asset(&asset_code).unwrap();
+        assert_eq!(meta1.status, AssetStatus::Active);
+        let version_after_first = meta1.version;
+
+        // Second cycle: deactivate and restore again
+        client.deactivate_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Second deactivation"),
+        );
+        client.restore_asset(&admin, &asset_code);
+
+        let meta2 = client.get_asset(&asset_code).unwrap();
+        assert_eq!(meta2.status, AssetStatus::Active);
+        // Version should continue incrementing, not reset
+        assert_eq!(meta2.version, version_after_first + 2);
+    }
+
+    #[test]
+    fn test_state_continuity_deactivate_restore() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, AssetRegistryContract);
+        let client = AssetRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Register asset with specific metadata
+        let asset_code = String::from_str(&env, "LEGACY");
+        client.register_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Legacy Token"),
+            &String::from_str(&env, "LEG"),
+            &String::from_str(&env, "legacy.com"),
+            8,
+            &AssetCategory::Other,
+            &String::from_str(&env, "Historical asset"),
+            &String::from_str(&env, "https://legacy.com"),
+        );
+
+        // Activate and record base state
+        client.update_status(&admin, &asset_code, &AssetStatus::Active);
+        let base_meta = client.get_asset(&asset_code).unwrap();
+
+        // Deactivate
+        client.deactivate_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Archived"),
+        );
+
+        // Restore
+        client.restore_asset(&admin, &asset_code);
+        let restored_meta = client.get_asset(&asset_code).unwrap();
+
+        // Verify all non-status fields are identical
+        assert_eq!(restored_meta.asset_code, base_meta.asset_code);
+        assert_eq!(restored_meta.name, base_meta.name);
+        assert_eq!(restored_meta.symbol, base_meta.symbol);
+        assert_eq!(restored_meta.issuer, base_meta.issuer);
+        assert_eq!(restored_meta.decimals, base_meta.decimals);
+        assert_eq!(restored_meta.category, base_meta.category);
+        assert_eq!(restored_meta.compliance, base_meta.compliance);
+        assert_eq!(restored_meta.risk_rating, base_meta.risk_rating);
+        assert_eq!(restored_meta.risk_score_bps, base_meta.risk_score_bps);
+        assert_eq!(restored_meta.description, base_meta.description);
+        assert_eq!(restored_meta.url, base_meta.url);
+        assert_eq!(restored_meta.registered_at, base_meta.registered_at);
+        assert_eq!(restored_meta.registered_by, base_meta.registered_by);
+        // Status must change
+        assert_eq!(restored_meta.status, AssetStatus::Active);
+        // Version incremented twice (once for deactivate, once for restore)
+        assert_eq!(restored_meta.version, base_meta.version + 2);
+    }
+
+    #[test]
+    fn test_version_history_tracks_deactivation() {
+        let (env, client, admin) = setup();
+        let asset_code = register_usdc(&env, &client, &admin);
+
+        client.update_status(&admin, &asset_code, &AssetStatus::Active);
+
+        // De activate the asset
+        client.deactivate_asset(
+            &admin,
+            &asset_code,
+            &String::from_str(&env, "Maintenance break"),
+        );
+
+        // Restore the asset
+        client.restore_asset(&admin, &asset_code);
+
+        // Check version history: should have 3 entries (registration, deactivation, restoration)
+        let versions = client.get_metadata_versions(&asset_code);
+        assert!(versions.len() >= 3);
+
+        // Latest version should reflect Active status
+        let latest = versions.get(versions.len() - 1).unwrap();
+        assert_eq!(latest.metadata.status, AssetStatus::Active);
     }
 
     // -----------------------------------------------------------------------
