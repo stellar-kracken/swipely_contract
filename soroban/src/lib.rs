@@ -19,6 +19,9 @@ pub mod source_trust;
 pub mod rate_limiter;
 pub mod migration;
 pub mod state_export;
+pub mod submission_pause;
+pub mod event_query;
+pub mod bridge_asset_metadata;
 
 #[cfg(test)]
 pub mod asset_registry;
@@ -694,6 +697,7 @@ impl BridgeWatchContract {
         bridge_uptime_score: u32,
 
     ) {
+        Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
         
         // Check if caller is a trusted source (if any sources are registered)
@@ -754,6 +758,7 @@ impl BridgeWatchContract {
     /// the same ledger timestamp. A `health_up` event is emitted per asset.
 
     pub fn submit_health_batch(env: Env, caller: Address, records: Vec<HealthScoreBatch>) {
+        Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
 
 
@@ -848,6 +853,7 @@ impl BridgeWatchContract {
         source: String,
 
     ) {
+        Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::PriceSubmitter);
         
         // Check if caller is a trusted source (if any sources are registered)
@@ -1400,6 +1406,7 @@ impl BridgeWatchContract {
         source_chain_supply: i128,
 
     ) {
+        Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -1637,6 +1644,7 @@ impl BridgeWatchContract {
         sources: Vec<String>,
 
     ) {
+        Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -2222,6 +2230,10 @@ impl BridgeWatchContract {
 
     }
 
+    fn assert_not_globally_paused(env: &Env) {
+        submission_pause::assert_not_paused(env);
+    }
+
 
     fn tier_rank(tier: &StatusTier) -> u32 {
 
@@ -2653,6 +2665,7 @@ impl BridgeWatchContract {
         pool_type: PoolType,
 
     ) {
+        Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -3055,6 +3068,7 @@ impl BridgeWatchContract {
         manual_override: Option<u32>,
 
     ) {
+        Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
 
         let status = Self::load_asset_health(&env, &asset_code);
@@ -5174,60 +5188,28 @@ impl BridgeWatchContract {
     // -----------------------------------------------------------------------
 
     /// Return the current event payload schema version.
-    ///
-    /// Off-chain consumers should call this after connecting to detect whether
-    /// a schema migration has occurred and rebuild their replay state if needed.
     pub fn get_replay_schema_version(_env: Env) -> u32 {
-        EVENT_SCHEMA_VERSION
+        event_query::EVENT_SCHEMA_VERSION
     }
 
     /// Query replay-friendly event history ordered by ascending `ordering_key`.
-    ///
-    /// Returns up to `limit` entries whose `ordering_key` is ≥
-    /// `from_ordering_key`. Pass `0` to start from the beginning of the log.
-    /// Maximum `limit` per call is 100. The returned `EventReplayPage` includes
-    /// the total log size so callers can implement cursor-based pagination.
-    pub fn get_replay_events(env: Env, from_ordering_key: u64, limit: u32) -> EventReplayPage {
-        if limit > 100 {
-            panic!("limit must not exceed 100");
-        }
-        let log: Vec<EventReplayEntry> = env
-            .storage()
-            .persistent()
-            .get(&keys::EVENT_REPLAY_LOG)
-            .unwrap_or_else(|| Vec::new(&env));
-        let total = log.len();
-        let mut page: Vec<EventReplayEntry> = Vec::new(&env);
-        for i in 0..total {
-            if page.len() >= limit {
-                break;
-            }
-            let entry = log.get(i).unwrap();
-            if entry.ordering_key >= from_ordering_key {
-                page.push_back(entry);
-            }
-        }
-        EventReplayPage {
-            entries: page,
-            total,
-            schema_version: EVENT_SCHEMA_VERSION,
-        }
+    pub fn get_replay_events(env: Env, from_ordering_key: u64, limit: u32) -> event_query::EventReplayPage {
+        event_query::get_replay_page(env, from_ordering_key, limit)
     }
 
     /// Return the total number of entries in the event replay log.
     pub fn get_replay_log_size(env: Env) -> u32 {
-        env.storage()
-            .persistent()
-            .get::<_, Vec<EventReplayEntry>>(&keys::EVENT_REPLAY_LOG)
-            .map(|v| v.len())
-            .unwrap_or(0)
+        event_query::log_size(&env)
     }
 
-    /// Internal: append one entry to the event replay log.
-    ///
-    /// The `ordering_key` is `(timestamp << 32) | (sequence & 0xFFFF_FFFF)`
-    /// providing stable, deterministic ordering even for same-timestamp events.
-    /// Log is capped at 1 000 entries; oldest entries are trimmed on overflow.
+    /// Query recent contract events with optional type and asset filters.
+    pub fn query_contract_events(
+        env: Env,
+        filter: event_query::ContractEventFilter,
+    ) -> event_query::ContractEventQueryResult {
+        event_query::query_events(env, filter)
+    }
+
     fn append_replay_event(
         env: &Env,
         event_type: String,
@@ -5235,41 +5217,79 @@ impl BridgeWatchContract {
         subject: String,
         value: i128,
     ) {
-        let seq: u32 = env
-            .storage()
-            .instance()
-            .get(&keys::EVENT_REPLAY_CTR)
-            .unwrap_or(0u32)
-            + 1;
-        env.storage().instance().set(&keys::EVENT_REPLAY_CTR, &seq);
-        let now = env.ledger().timestamp();
-        let ordering_key = (now << 32) | (seq as u64);
-        let entry = EventReplayEntry {
-            event_id: seq,
-            event_type,
-            actor,
-            subject,
-            value,
-            timestamp: now,
-            ordering_key,
-            schema_version: EVENT_SCHEMA_VERSION,
-        };
-        let mut log: Vec<EventReplayEntry> = env
-            .storage()
-            .persistent()
-            .get(&keys::EVENT_REPLAY_LOG)
-            .unwrap_or_else(|| Vec::new(env));
-        log.push_back(entry);
-        if log.len() > 1000 {
-            let mut trimmed: Vec<EventReplayEntry> = Vec::new(env);
-            for i in 1..log.len() {
-                trimmed.push_back(log.get(i).unwrap());
-            }
-            log = trimmed;
-        }
-        env.storage()
-            .persistent()
-            .set(&keys::EVENT_REPLAY_LOG, &log);
+        event_query::append_event(env, event_type, actor, subject, value);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pausable data submission (issue #450)
+    // -----------------------------------------------------------------------
+
+    /// Pause all mutating data submissions while keeping reads available.
+    pub fn pause_submissions(env: Env, caller: Address, reason: String) {
+        submission_pause::pause(env, caller, reason);
+    }
+
+    /// Resume data submissions after a global pause.
+    pub fn resume_submissions(env: Env, caller: Address) {
+        submission_pause::resume(env, caller);
+    }
+
+    /// Returns whether contract-wide data submissions are paused.
+    pub fn is_submissions_paused(env: Env) -> bool {
+        submission_pause::is_paused(&env)
+    }
+
+    /// Read the current submission pause state.
+    pub fn get_submission_pause_state(env: Env) -> submission_pause::SubmissionPauseState {
+        submission_pause::get_state(&env)
+    }
+
+    /// Return pause/unpause audit history.
+    pub fn get_submission_pause_history(env: Env) -> soroban_sdk::Vec<submission_pause::PauseHistoryEntry> {
+        submission_pause::get_history(env)
+    }
+
+    // -----------------------------------------------------------------------
+    // Asset metadata updates (issue #451)
+    // -----------------------------------------------------------------------
+
+    /// Update monitored asset metadata without recreating the asset entry.
+    pub fn update_asset_metadata(
+        env: Env,
+        caller: Address,
+        asset_code: String,
+        name: String,
+        symbol: String,
+        description: String,
+        url: String,
+        change_reason: String,
+    ) -> bridge_asset_metadata::BridgeAssetMetadata {
+        bridge_asset_metadata::update_metadata(
+            env,
+            caller,
+            asset_code,
+            name,
+            symbol,
+            description,
+            url,
+            change_reason,
+        )
+    }
+
+    /// Read asset metadata document.
+    pub fn get_asset_metadata(
+        env: Env,
+        asset_code: String,
+    ) -> Option<bridge_asset_metadata::BridgeAssetMetadata> {
+        bridge_asset_metadata::get_metadata(env, asset_code)
+    }
+
+    /// Read asset metadata change history.
+    pub fn get_asset_metadata_history(
+        env: Env,
+        asset_code: String,
+    ) -> soroban_sdk::Vec<bridge_asset_metadata::MetadataChangeRecord> {
+        bridge_asset_metadata::get_metadata_history(env, asset_code)
     }
 
     // ── Trusted Source Registry ───────────────────────────────────────────────
