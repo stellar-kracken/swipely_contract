@@ -517,7 +517,7 @@ impl AssetRegistryContract {
         let mut metadata = Self::get_asset_or_err(&env, &asset_code)?;
 
         // Cannot update frozen assets
-        if Self::is_asset_frozen(&env, asset_code.clone()) {
+        if Self::is_asset_frozen(env.clone(), asset_code.clone()) {
             return Err(RegistryError::AssetFrozen);
         }
 
