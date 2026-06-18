@@ -5780,7 +5780,6 @@ impl BridgeWatchContract {
     pub fn get_risk_score_config(env: Env) -> RiskScoreConfig {
         Self::load_risk_score_config(&env)
     }
-}
 
     /// Pure deterministic calculation for the composite risk score.
     ///
