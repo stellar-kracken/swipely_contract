@@ -30,10 +30,10 @@ fn seed_bytes(seed: u64, len: usize) -> Vec<u8> {
     let mut value = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut bytes = Vec::with_capacity(len);
     for _ in 0..len {
-      value ^= value << 7;
-      value ^= value >> 9;
-      value = value.wrapping_mul(0xD134_2543_DE82_EF95);
-      bytes.push((value & 0xFF) as u8);
+        value ^= value << 7;
+        value ^= value >> 9;
+        value = value.wrapping_mul(0xD134_2543_DE82_EF95);
+        bytes.push((value & 0xFF) as u8);
     }
     bytes
 }
@@ -58,11 +58,19 @@ fn deterministic_fuzz_send_message_rejects_malformed_inputs() {
     let mut insufficient_fee = 0_u32;
 
     for seed in seeds {
-        let payload_len = if seed % 3 == 0 { 16_385 } else { 1 + (seed as usize % 128) };
+        let payload_len = if seed % 3 == 0 {
+            16_385
+        } else {
+            1 + (seed as usize % 128)
+        };
         let payload = Bytes::from_slice(&env, &seed_bytes(seed, payload_len));
         let nonce = seed % 2;
         let ttl = if seed % 5 == 0 { 1 } else { 120 };
-        let fee = if seed % 4 == 0 { 0 } else { 10 + i128::from(seed as i64) };
+        let fee = if seed % 4 == 0 {
+            0
+        } else {
+            10 + i128::from(seed as i64)
+        };
 
         let result = client.try_send_message(
             &chain_for(seed),
@@ -92,7 +100,10 @@ fn deterministic_fuzz_send_message_rejects_malformed_inputs() {
     // accepted may be zero if the Soroban environment rejects all seeds
     // (e.g. nonce conflicts); we guard on classification coverage instead.
     assert!(rejected > 0, "expected at least one rejected seed");
-    assert!(payload_too_large > 0, "expected payload classification coverage");
+    assert!(
+        payload_too_large > 0,
+        "expected payload classification coverage"
+    );
     assert!(insufficient_fee > 0, "expected fee classification coverage");
 
     println!(
@@ -138,7 +149,10 @@ fn deterministic_fuzz_relay_message_classifies_signature_failures() {
                     let mut payload = [0u8; 64];
                     payload[..32].copy_from_slice(&message_id.to_array());
                     payload[32..].copy_from_slice(&op.public_key.to_array());
-                    let digest: BytesN<32> = env.crypto().sha256(&Bytes::from_slice(&env, &payload)).into();
+                    let digest: BytesN<32> = env
+                        .crypto()
+                        .sha256(&Bytes::from_slice(&env, &payload))
+                        .into();
                     let d = digest.to_array();
                     let mut out = [0u8; 64];
                     let mut i = 0usize;
@@ -185,7 +199,10 @@ fn deterministic_fuzz_batch_relay_reports_mixed_outcomes() {
             let mut payload = [0u8; 64];
             payload[..32].copy_from_slice(&message_id.to_array());
             payload[32..].copy_from_slice(&op.public_key.to_array());
-            let digest: BytesN<32> = env.crypto().sha256(&Bytes::from_slice(&env, &payload)).into();
+            let digest: BytesN<32> = env
+                .crypto()
+                .sha256(&Bytes::from_slice(&env, &payload))
+                .into();
             let d = digest.to_array();
             let mut out = [0u8; 64];
             let mut i = 0usize;

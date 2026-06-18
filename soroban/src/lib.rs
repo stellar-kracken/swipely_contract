@@ -1063,7 +1063,6 @@ pub enum HealthSourceDataKey {
 // ---------------------------------------------------------------------------
 // Admin Activity Service types (issue #299)
 // ---------------------------------------------------------------------------
->>>>>>> upstream/main
 
 /// Categories of admin actions captured by the activity log.
 #[contracttype]
