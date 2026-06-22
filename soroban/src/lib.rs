@@ -37,6 +37,7 @@ use liquidity_pool::{
     PoolSnapshot, PoolType,
 };
 // Storage key constants instead of using DataKey enum for storage operations
+#[allow(dead_code)]
 mod keys {
     pub const ADMIN: &str = "admin";
     pub const ASSET_HEALTH: &str = "asset_health";
@@ -1586,8 +1587,8 @@ impl BridgeWatchContract {
             j += 1;
         }
 
-        // Keep signer record writable in this flow for Soroban auth/footprint compatibility.
-        signer.registered_at = signer.registered_at;
+        // Keep signer record in scope for Soroban auth/footprint compatibility.
+        let _ = &signer;
 
         env.storage().persistent().set(
             &ConfigDataKey::SignerNonce(signature.signer_id.clone()),
@@ -5257,6 +5258,7 @@ impl BridgeWatchContract {
         }
     }
 
+    #[allow(dead_code)]
     fn tier_rank(tier: &StatusTier) -> u32 {
         match tier {
             StatusTier::Ok => 0,
@@ -5269,6 +5271,7 @@ impl BridgeWatchContract {
         }
     }
 
+    #[allow(dead_code)]
     fn max_tier(a: StatusTier, b: StatusTier) -> StatusTier {
         if Self::tier_rank(&a) >= Self::tier_rank(&b) {
             a
@@ -5277,6 +5280,7 @@ impl BridgeWatchContract {
         }
     }
 
+    #[allow(dead_code)]
     fn health_to_tier(score: u32) -> StatusTier {
         if score >= 80 {
             StatusTier::Ok
@@ -5289,6 +5293,7 @@ impl BridgeWatchContract {
         }
     }
 
+    #[allow(dead_code)]
     fn deviation_to_tier(alert: &Option<DeviationAlert>) -> (bool, StatusTier) {
         match alert {
             None => (false, StatusTier::Ok),
@@ -5303,6 +5308,7 @@ impl BridgeWatchContract {
         }
     }
 
+    #[allow(dead_code)]
     fn compute_contract_tier_from_counts(rollup: &ContractStatusRollup) -> StatusTier {
         if rollup.asset_high > 0 || rollup.bridge_high > 0 {
             StatusTier::High
@@ -5315,6 +5321,7 @@ impl BridgeWatchContract {
         }
     }
 
+    #[allow(dead_code)]
     fn bump_contract_counts_for_asset(env: &Env, prev: Option<StatusTier>, next: StatusTier) {
         let mut rollup: ContractStatusRollup = env
             .storage()
@@ -5376,6 +5383,7 @@ impl BridgeWatchContract {
             .publish((symbol_short!("ctr_st"),), rollup.tier.clone());
     }
 
+    #[allow(dead_code)]
     fn bump_contract_counts_for_bridge(env: &Env, prev: Option<StatusTier>, next: StatusTier) {
         let mut rollup: ContractStatusRollup = env
             .storage()
@@ -5437,6 +5445,7 @@ impl BridgeWatchContract {
             .publish((symbol_short!("ctr_st"),), rollup.tier.clone());
     }
 
+    #[allow(dead_code)]
     fn update_asset_rollup(env: &Env, asset_code: &String) {
         let health = Self::load_asset_health(env, asset_code);
 
@@ -5494,6 +5503,7 @@ impl BridgeWatchContract {
             .publish((symbol_short!("asset_st"), asset_code.clone()), tier);
     }
 
+    #[allow(dead_code)]
     fn update_bridge_rollup(env: &Env, bridge_id: &String, mismatch_bps: i128, is_critical: bool) {
         let tier = if is_critical {
             StatusTier::High
@@ -7660,10 +7670,10 @@ impl BridgeWatchContract {
 
         // Calculate all statistics
         let average = Self::calculate_average(env.clone(), prices.clone());
-        let stddev = Self::calculate_stddev(env.clone(), prices.clone());
+        let _stddev = Self::calculate_stddev(env.clone(), prices.clone());
         let volatility = Self::calculate_volatility(env.clone(), prices.clone(), period_secs);
-        let (min_price, max_price) = Self::calculate_min_max(env.clone(), prices.clone());
-        let (p25, median, p75) = Self::calculate_percentiles(env.clone(), prices.clone());
+        let (_min_price, _max_price) = Self::calculate_min_max(env.clone(), prices.clone());
+        let (_p25, _median, _p75) = Self::calculate_percentiles(env.clone(), prices.clone());
 
         // Create and store statistics record
         let stats = Statistics {
@@ -8310,7 +8320,7 @@ impl BridgeWatchContract {
             trusted: true,
             registered_at: now,
         };
-        let mut sources: Vec<HealthSource> = env
+        let sources: Vec<HealthSource> = env
             .storage()
             .instance()
             .get(&keys::HEALTH_SOURCES)
@@ -8355,7 +8365,7 @@ impl BridgeWatchContract {
         if caller != admin {
             panic!("only admin can revoke health sources");
         }
-        let mut sources: Vec<HealthSource> = env
+        let sources: Vec<HealthSource> = env
             .storage()
             .instance()
             .get(&keys::HEALTH_SOURCES)
