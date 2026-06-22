@@ -1535,7 +1535,7 @@ impl BridgeWatchContract {
     /// Verify a single signature against a message and signer metadata.
     #[allow(dead_code, clippy::self_assignment)]
     pub fn verify_signature(env: Env, message: Bytes, signature: SignerSignature) -> bool {
-        let mut signer = Self::load_signer(&env, &signature.signer_id);
+        let signer = Self::load_signer(&env, &signature.signer_id);
 
         if !signer.active {
             panic!("signer is not active");
