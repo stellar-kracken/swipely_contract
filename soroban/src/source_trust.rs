@@ -141,7 +141,7 @@ pub fn register_trusted_source(
     name: String,
 ) {
     // Validate inputs
-    if name.len() == 0 {
+    if name.is_empty() {
         panic!("source name cannot be empty");
     }
 

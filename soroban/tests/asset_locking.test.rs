@@ -400,7 +400,11 @@ fn test_asset_manager_can_lock_asset() {
     client.register_asset(&admin, &asset_code);
 
     // Asset manager should be able to lock
-    client.lock_asset(&manager, &asset_code, &String::from_str(&env, "Manager lock"));
+    client.lock_asset(
+        &manager,
+        &asset_code,
+        &String::from_str(&env, "Manager lock"),
+    );
 
     assert!(client.is_asset_locked(&asset_code));
 }
@@ -544,7 +548,11 @@ fn test_different_admin_can_unlock() {
     client.register_asset(&admin, &asset_code);
 
     // Admin locks
-    client.lock_asset(&admin, &asset_code, &String::from_str(&env, "Locked by admin"));
+    client.lock_asset(
+        &admin,
+        &asset_code,
+        &String::from_str(&env, "Locked by admin"),
+    );
 
     // Manager unlocks
     client.unlock_asset(&manager, &asset_code);

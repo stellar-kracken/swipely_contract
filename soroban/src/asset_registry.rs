@@ -749,7 +749,7 @@ impl AssetRegistryContract {
 
         // Emit deactivation event
         env.events()
-            .publish((symbol_short!("asset_deact"), asset_code.clone()), admin);
+            .publish((symbol_short!("ast_dact"), asset_code.clone()), admin);
 
         Ok(())
     }
@@ -820,7 +820,7 @@ impl AssetRegistryContract {
 
         // Emit restoration event
         env.events()
-            .publish((symbol_short!("asset_rest"), asset_code.clone()), admin);
+            .publish((symbol_short!("ast_rest"), asset_code.clone()), admin);
 
         Ok(())
     }
@@ -2071,7 +2071,7 @@ mod tests {
             &String::from_str(&env, "Legacy Token"),
             &String::from_str(&env, "LEG"),
             &String::from_str(&env, "legacy.com"),
-            8,
+            &8u32,
             &AssetCategory::Other,
             &String::from_str(&env, "Historical asset"),
             &String::from_str(&env, "https://legacy.com"),
