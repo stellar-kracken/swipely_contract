@@ -10,6 +10,7 @@ pub mod analytics_aggregator;
 pub mod asset_registry;
 #[cfg(test)]
 pub mod circuit_breaker;
+pub mod emergency_fund_recovery;
 #[cfg(test)]
 pub mod governance;
 #[cfg(test)]
@@ -28,6 +29,7 @@ pub mod source_blessing;
 pub mod source_trust;
 pub mod state_export;
 pub mod threshold_window;
+pub mod version_migration_helper;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, String, Vec,
 };
