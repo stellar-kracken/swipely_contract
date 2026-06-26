@@ -789,6 +789,15 @@ fn isqrt(n: i128) -> i128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::{testutils::Ledger as _, Env, String};
+
+    fn setup() -> Env {
+        let env = Env::default();
+        env.mock_all_auths();
+        env
+    }
+
+    // ── Math utility tests ─────────────────────────────────────────────────
 
     #[test]
     fn test_isqrt_values() {
@@ -803,8 +812,445 @@ mod tests {
 
     #[test]
     fn test_isqrt_precision_scale() {
-        // sqrt(PRECISION * PRECISION) == PRECISION
         let val = PRECISION * PRECISION;
         assert_eq!(isqrt(val), PRECISION);
+    }
+
+    // ── Pool state recording tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_record_pool_state_creates_snapshot() {
+        let env = setup();
+        env.ledger().set_timestamp(1000);
+
+        let pool_id = String::from_str(&env, "USDC_XLM");
+        let reserve_a = 1_000 * PRECISION;
+        let reserve_b = 5_000 * PRECISION;
+        let total_shares = 2_236 * PRECISION; // sqrt(1000 * 5000)
+        let volume = 100 * PRECISION;
+        let fees = 10 * PRECISION;
+
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            reserve_a,
+            reserve_b,
+            total_shares,
+            volume,
+            fees,
+            PoolType::Amm,
+        );
+
+        let snapshots = get_pool_history(&env, pool_id, 0, 2000);
+        assert_eq!(snapshots.len(), 1);
+
+        let snap = snapshots.get(0).unwrap();
+        assert_eq!(snap.reserve_a, reserve_a);
+        assert_eq!(snap.reserve_b, reserve_b);
+        assert_eq!(snap.total_shares, total_shares);
+        assert_eq!(snap.volume, volume);
+        assert_eq!(snap.fees_collected, fees);
+        assert_eq!(snap.pool_type, PoolType::Amm);
+    }
+
+    #[test]
+    fn test_record_pool_state_calculates_price() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "EUR_XLM");
+        let reserve_a = 100 * PRECISION;
+        let reserve_b = 500 * PRECISION; // price = 5
+
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            reserve_a,
+            reserve_b,
+            100 * PRECISION,
+            0,
+            0,
+            PoolType::Sdex,
+        );
+
+        let snapshots = get_pool_history(&env, pool_id, 0, u64::MAX);
+        let snap = snapshots.get(0).unwrap();
+        assert_eq!(snap.price, 5 * PRECISION);
+    }
+
+    #[test]
+    fn test_record_multiple_snapshots() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "TEST_POOL");
+
+        for i in 0..5 {
+            env.ledger().set_timestamp(1000 + i * 3600);
+            record_pool_state(
+                &env,
+                pool_id.clone(),
+                (1000 + i * 100) as i128 * PRECISION,
+                (5000 + i * 500) as i128 * PRECISION,
+                2000 * PRECISION,
+                100 * PRECISION,
+                10 * PRECISION,
+                PoolType::Amm,
+            );
+        }
+
+        let snapshots = get_pool_history(&env, pool_id.clone(), 0, u64::MAX);
+        assert_eq!(snapshots.len(), 5);
+    }
+
+    #[test]
+    fn test_record_pool_state_registers_pool() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "NEW_POOL");
+
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1000 * PRECISION,
+            5000 * PRECISION,
+            2000 * PRECISION,
+            0,
+            0,
+            PoolType::Amm,
+        );
+
+        let pools = get_registered_pools(&env);
+        assert!(pools.len() >= 1);
+        let found = pools.iter().find(|p| p == &pool_id);
+        assert!(found.is_some());
+    }
+
+    // ── Pool metrics calculation tests ─────────────────────────────────────
+
+    #[test]
+    fn test_calculate_pool_metrics_no_snapshots() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "EMPTY_POOL");
+
+        let metrics = calculate_pool_metrics(&env, pool_id, 3600);
+        assert_eq!(metrics.total_volume, 0);
+        assert_eq!(metrics.avg_depth, 0);
+        assert_eq!(metrics.total_fees, 0);
+        assert_eq!(metrics.data_points, 0);
+    }
+
+    #[test]
+    fn test_calculate_pool_metrics_single_snapshot() {
+        let env = setup();
+        env.ledger().set_timestamp(5000);
+
+        let pool_id = String::from_str(&env, "SINGLE_POOL");
+        let reserve_a = 1000 * PRECISION;
+        let reserve_b = 5000 * PRECISION;
+        let volume = 100 * PRECISION;
+        let fees = 10 * PRECISION;
+
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            reserve_a,
+            reserve_b,
+            2000 * PRECISION,
+            volume,
+            fees,
+            PoolType::Amm,
+        );
+
+        let metrics = calculate_pool_metrics(&env, pool_id, 10000);
+        assert_eq!(metrics.total_volume, volume);
+        assert_eq!(metrics.total_fees, fees);
+        assert_eq!(metrics.data_points, 1);
+        assert!(metrics.avg_depth > 0);
+    }
+
+    #[test]
+    fn test_calculate_pool_metrics_window_filtering() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "WINDOW_POOL");
+
+        // Record snapshot at t=1000
+        env.ledger().set_timestamp(1000);
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1000 * PRECISION,
+            5000 * PRECISION,
+            2000 * PRECISION,
+            100 * PRECISION,
+            10 * PRECISION,
+            PoolType::Amm,
+        );
+
+        // Record snapshot at t=5000
+        env.ledger().set_timestamp(5000);
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1200 * PRECISION,
+            6000 * PRECISION,
+            2400 * PRECISION,
+            150 * PRECISION,
+            15 * PRECISION,
+            PoolType::Amm,
+        );
+
+        // Query with narrow window (1000-2000) should return 1 snapshot
+        let metrics_narrow = calculate_pool_metrics(&env, pool_id.clone(), 1000);
+        assert_eq!(metrics_narrow.data_points, 1);
+
+        // Query with wide window should return 2 snapshots
+        let metrics_wide = calculate_pool_metrics(&env, pool_id, 10000);
+        assert_eq!(metrics_wide.data_points, 2);
+    }
+
+    #[test]
+    fn test_calculate_pool_metrics_accumulates_volume_and_fees() {
+        let env = setup();
+        env.ledger().set_timestamp(1000);
+
+        let pool_id = String::from_str(&env, "ACCUM_POOL");
+
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1000 * PRECISION,
+            5000 * PRECISION,
+            2000 * PRECISION,
+            100 * PRECISION,
+            10 * PRECISION,
+            PoolType::Amm,
+        );
+
+        env.ledger().set_timestamp(2000);
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1100 * PRECISION,
+            5500 * PRECISION,
+            2200 * PRECISION,
+            50 * PRECISION,
+            5 * PRECISION,
+            PoolType::Amm,
+        );
+
+        let metrics = calculate_pool_metrics(&env, pool_id, 10000);
+        assert_eq!(metrics.total_volume, 150 * PRECISION);
+        assert_eq!(metrics.total_fees, 15 * PRECISION);
+    }
+
+    // ── Liquidity depth tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_get_liquidity_depth_no_snapshots() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "EMPTY");
+        let depth = get_liquidity_depth(&env, pool_id);
+        assert_eq!(depth.depth, 0);
+    }
+
+    #[test]
+    fn test_get_liquidity_depth_single_snapshot() {
+        let env = setup();
+        env.ledger().set_timestamp(1000);
+
+        let pool_id = String::from_str(&env, "DEPTH_POOL");
+        let reserve_a = 1000 * PRECISION;
+        let reserve_b = 5000 * PRECISION;
+
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            reserve_a,
+            reserve_b,
+            2000 * PRECISION,
+            0,
+            0,
+            PoolType::Amm,
+        );
+
+        let depth = get_liquidity_depth(&env, pool_id);
+        let avg = (reserve_a + reserve_b) / 2;
+        assert_eq!(depth.depth, avg);
+    }
+
+    // ── Impermanent loss tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_calculate_impermanent_loss_no_price_change() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "IL_POOL");
+        let entry_price = 5 * PRECISION;
+        let initial_value = 10_000 * PRECISION;
+
+        env.ledger().set_timestamp(1000);
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1000 * PRECISION,
+            5000 * PRECISION,
+            2000 * PRECISION,
+            0,
+            0,
+            PoolType::Amm,
+        );
+
+        let result = calculate_impermanent_loss(&env, pool_id, entry_price, initial_value);
+        assert_eq!(result.entry_price, entry_price);
+        assert_eq!(result.current_value, initial_value);
+        assert_eq!(result.net_loss, 0);
+    }
+
+    #[test]
+    fn test_calculate_impermanent_loss_with_price_change() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "IL_CHANGE_POOL");
+        let entry_price = 5 * PRECISION;
+        let initial_value = 10_000 * PRECISION;
+
+        env.ledger().set_timestamp(1000);
+        // Price at entry: reserve_b / reserve_a = 5000 / 1000 = 5
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1000 * PRECISION,
+            5000 * PRECISION,
+            2000 * PRECISION,
+            0,
+            0,
+            PoolType::Amm,
+        );
+
+        env.ledger().set_timestamp(2000);
+        // Price changes to: 6000 / 1000 = 6
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1000 * PRECISION,
+            6000 * PRECISION,
+            2400 * PRECISION,
+            0,
+            0,
+            PoolType::Amm,
+        );
+
+        let result = calculate_impermanent_loss(&env, pool_id, entry_price, initial_value);
+        assert!(result.il_percentage >= 0);
+    }
+
+    #[test]
+    fn test_calculate_impermanent_loss_invalid_prices() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "INVALID_POOL");
+        let initial_value = 10_000 * PRECISION;
+
+        let result = calculate_impermanent_loss(&env, pool_id, 0, initial_value);
+        assert_eq!(result.il_percentage, 0);
+        assert_eq!(result.current_value, initial_value);
+    }
+
+    // ── Daily bucket aggregation tests ─────────────────────────────────────
+
+    #[test]
+    fn test_get_daily_history() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "DAILY_POOL");
+
+        // Record snapshots in same day
+        env.ledger().set_timestamp(86400); // 1 day in seconds
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1000 * PRECISION,
+            5000 * PRECISION,
+            2000 * PRECISION,
+            100 * PRECISION,
+            10 * PRECISION,
+            PoolType::Amm,
+        );
+
+        env.ledger().set_timestamp(86400 + 3600); // +1 hour
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1100 * PRECISION,
+            5500 * PRECISION,
+            2200 * PRECISION,
+            50 * PRECISION,
+            5 * PRECISION,
+            PoolType::Amm,
+        );
+
+        let daily = get_daily_history(&env, pool_id, 0, u64::MAX);
+        assert!(daily.len() >= 1);
+
+        let bucket = daily.get(0).unwrap();
+        assert_eq!(bucket.total_volume, 150 * PRECISION);
+        assert_eq!(bucket.total_fees, 15 * PRECISION);
+    }
+
+    // ── Edge cases and error handling ──────────────────────────────────────
+
+    #[test]
+    fn test_record_pool_with_zero_reserves() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "ZERO_RESERVE");
+
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            0,
+            5000 * PRECISION,
+            0,
+            0,
+            0,
+            PoolType::Amm,
+        );
+
+        let snapshots = get_pool_history(&env, pool_id, 0, u64::MAX);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots.get(0).unwrap().price, 0); // price undefined when reserve_a = 0
+    }
+
+    #[test]
+    fn test_record_pool_sdex_type() {
+        let env = setup();
+        let pool_id = String::from_str(&env, "SDEX_POOL");
+
+        record_pool_state(
+            &env,
+            pool_id.clone(),
+            1000 * PRECISION,
+            5000 * PRECISION,
+            2000 * PRECISION,
+            100 * PRECISION,
+            10 * PRECISION,
+            PoolType::Sdex,
+        );
+
+        let snapshots = get_pool_history(&env, pool_id, 0, u64::MAX);
+        assert_eq!(snapshots.get(0).unwrap().pool_type, PoolType::Sdex);
+    }
+
+    #[test]
+    fn test_get_registered_pools_multiple() {
+        let env = setup();
+
+        for i in 0..3 {
+            let pool_id = String::from_str(&env, &format!("POOL_{}", i));
+            record_pool_state(
+                &env,
+                pool_id,
+                1000 * PRECISION,
+                5000 * PRECISION,
+                2000 * PRECISION,
+                0,
+                0,
+                PoolType::Amm,
+            );
+        }
+
+        let pools = get_registered_pools(&env);
+        assert!(pools.len() >= 3);
     }
 }
