@@ -15,6 +15,7 @@ pub mod batch_query;
 #[cfg(test)]
 pub mod circuit_breaker;
 pub mod emergency_fund_recovery;
+pub mod escrow_contract;
 #[cfg(test)]
 pub mod governance;
 #[cfg(test)]

@@ -16,3 +16,15 @@ soroban-sdk = { version = "22.0.10" }
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.10", features = ["testutils"] }
+
+[[test]]
+name = "asset_locking_test"
+path = "tests/asset_locking.test.rs"
+
+[[test]]
+name = "source_trust_test"
+path = "tests/source_trust.test.rs"
+
+[[test]]
+name = "escrow_contract_test"
+path = "tests/escrow_contract.test.rs"
