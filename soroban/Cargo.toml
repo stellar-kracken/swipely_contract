@@ -1,5 +1,5 @@
 [package]
-name = "bridge-watch-contracts"
+name = "swipely-contracts"
 version = "0.1.0"
 edition = "2021"
 description = "Soroban smart contracts for Stellar Bridge Watch on-chain monitoring"
