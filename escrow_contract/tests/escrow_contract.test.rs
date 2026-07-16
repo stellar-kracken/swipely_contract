@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String, contract, contractimpl, symbol_short, Vec};
-use bridge_watch_contracts::escrow_contract::{TimeLockedEscrowContract, TimeLockedEscrowContractClient};
+use escrow_contract::{TimeLockedEscrowContract, TimeLockedEscrowContractClient};
 
 #[contract]
 pub struct MockBridgeVerifier;

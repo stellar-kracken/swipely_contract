@@ -9,11 +9,12 @@ locking/escrow, operator rotation, and transfer state tracking.
 
 ## Workspace layout
 
-This is a Cargo workspace with two members:
+This is a Cargo workspace with the following members:
 
 | Crate | Description |
 | --- | --- |
-| `soroban/` | Core Soroban contracts (access control, trusted sources, escrow, thresholds) |
+| `soroban/` | Core Soroban contracts (access control, trusted sources, thresholds) |
+| `escrow_contract/` | Time-locked escrow contract for bridge transfers |
 | `transfer_state_machine/` | Transfer state-machine contract logic |
 | `harness/` | Test harness and integration helpers |
 

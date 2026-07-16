@@ -1,0 +1,19 @@
+[package]
+name = "escrow-contract"
+version = "0.1.0"
+edition = "2021"
+description = "Soroban time-locked escrow contract for Swipely bridge transfers"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { version = "22.0.10" }
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.10", features = ["testutils"] }
+
+[[test]]
+name = "escrow_contract_test"
+path = "tests/escrow_contract.test.rs"
