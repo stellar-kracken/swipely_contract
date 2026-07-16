@@ -1912,6 +1912,7 @@ impl BridgeWatchContract {
     /// `AssetManager`.
     pub fn pause_asset(env: Env, caller: Address, asset_code: String) {
         Self::check_permission(&env, &caller, AdminRole::AssetManager);
+        Self::assert_asset_not_locked(&env, &asset_code);
         let mut status = Self::load_asset_health(&env, &asset_code);
         if !status.active {
             panic!("cannot pause a deregistered asset");
@@ -1934,6 +1935,7 @@ impl BridgeWatchContract {
     /// `AssetManager`.
     pub fn unpause_asset(env: Env, caller: Address, asset_code: String) {
         Self::check_permission(&env, &caller, AdminRole::AssetManager);
+        Self::assert_asset_not_locked(&env, &asset_code);
         let mut status = Self::load_asset_health(&env, &asset_code);
         if !status.active {
             panic!("cannot unpause a deregistered asset");
