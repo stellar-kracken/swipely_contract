@@ -206,116 +206,148 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::testutils::Ledger;
-    use soroban_sdk::Env;
+    use soroban_sdk::{contract, contractimpl, Env};
 
-    fn setup() -> (Env, Address) {
+    // Free functions in this module touch env.storage(), which soroban-sdk only
+    // allows from within an active contract call frame. This dummy contract
+    // exists purely to give tests that frame via env.as_contract().
+    #[contract]
+    struct TestContext;
+
+    #[contractimpl]
+    impl TestContext {}
+
+    fn setup() -> (Env, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
+        let contract_id = env.register_contract(None, TestContext);
         let admin = Address::generate(&env);
-        env.storage().instance().set(&keys::ADMIN, &admin);
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&keys::ADMIN, &admin);
+        });
         env.ledger().set_timestamp(1_000_000);
-        (env, admin)
+        (env, admin, contract_id)
     }
 
     #[test]
     fn test_add_operator() {
-        let (env, admin) = setup();
+        let (env, admin, contract_id) = setup();
         let op = Address::generate(&env);
 
-        add_operator(&env, &admin, &op, String::from_str(&env, "Operator 1"));
+        env.as_contract(&contract_id, || {
+            add_operator(&env, &admin, &op, String::from_str(&env, "Operator 1"));
 
-        assert!(is_operator(&env, &op));
+            assert!(is_operator(&env, &op));
+        });
     }
 
     #[test]
     fn test_remove_operator() {
-        let (env, admin) = setup();
+        let (env, admin, contract_id) = setup();
         let op = Address::generate(&env);
 
-        add_operator(&env, &admin, &op, String::from_str(&env, "Operator 1"));
-        assert!(is_operator(&env, &op));
+        env.as_contract(&contract_id, || {
+            add_operator(&env, &admin, &op, String::from_str(&env, "Operator 1"));
+            assert!(is_operator(&env, &op));
 
-        remove_operator(&env, &admin, &op);
-        assert!(!is_operator(&env, &op));
+            remove_operator(&env, &admin, &op);
+            assert!(!is_operator(&env, &op));
+        });
     }
 
     #[test]
     fn test_cannot_remove_last_operator() {
-        let (env, admin) = setup();
+        let (env, admin, contract_id) = setup();
         let op = Address::generate(&env);
 
-        add_operator(&env, &admin, &op, String::from_str(&env, "Operator 1"));
-        assert!(is_operator(&env, &op));
+        env.as_contract(&contract_id, || {
+            add_operator(&env, &admin, &op, String::from_str(&env, "Operator 1"));
+            assert!(is_operator(&env, &op));
+        });
     }
 
     #[test]
     fn test_get_all_operators() {
-        let (env, admin) = setup();
+        let (env, admin, contract_id) = setup();
         let op1 = Address::generate(&env);
         let op2 = Address::generate(&env);
 
-        add_operator(&env, &admin, &op1, String::from_str(&env, "Op 1"));
-        add_operator(&env, &admin, &op2, String::from_str(&env, "Op 2"));
+        env.as_contract(&contract_id, || {
+            add_operator(&env, &admin, &op1, String::from_str(&env, "Op 1"));
+            add_operator(&env, &admin, &op2, String::from_str(&env, "Op 2"));
 
-        let all = get_all_operators(&env);
-        assert_eq!(all.len(), 2);
+            let all = get_all_operators(&env);
+            assert_eq!(all.len(), 2);
+        });
     }
 
     #[test]
     fn test_get_active_operators_excludes_removed() {
-        let (env, admin) = setup();
+        let (env, admin, contract_id) = setup();
         let op1 = Address::generate(&env);
         let op2 = Address::generate(&env);
 
-        add_operator(&env, &admin, &op1, String::from_str(&env, "Op 1"));
-        add_operator(&env, &admin, &op2, String::from_str(&env, "Op 2"));
-        remove_operator(&env, &admin, &op1);
+        env.as_contract(&contract_id, || {
+            add_operator(&env, &admin, &op1, String::from_str(&env, "Op 1"));
+            add_operator(&env, &admin, &op2, String::from_str(&env, "Op 2"));
+            remove_operator(&env, &admin, &op1);
 
-        let active = get_active_operators(&env);
-        assert_eq!(active.len(), 1);
-        assert_eq!(active.get(0).unwrap().address, op2);
+            let active = get_active_operators(&env);
+            assert_eq!(active.len(), 1);
+            assert_eq!(active.get(0).unwrap().address, op2);
+        });
     }
 
     #[test]
     fn test_unknown_operator_not_active() {
-        let (env, _admin) = setup();
+        let (env, _admin, contract_id) = setup();
         let unknown = Address::generate(&env);
-        assert!(!is_operator(&env, &unknown));
+        env.as_contract(&contract_id, || {
+            assert!(!is_operator(&env, &unknown));
+        });
     }
 
     #[test]
     #[should_panic(expected = "operator name cannot be empty")]
     fn test_add_operator_empty_name() {
-        let (env, admin) = setup();
+        let (env, admin, contract_id) = setup();
         let op = Address::generate(&env);
-        add_operator(&env, &admin, &op, String::from_str(&env, ""));
+        env.as_contract(&contract_id, || {
+            add_operator(&env, &admin, &op, String::from_str(&env, ""));
+        });
     }
 
     #[test]
     #[should_panic(expected = "operator not found")]
     fn test_remove_unregistered_operator() {
-        let (env, admin) = setup();
+        let (env, admin, contract_id) = setup();
         let op = Address::generate(&env);
-        remove_operator(&env, &admin, &op);
+        env.as_contract(&contract_id, || {
+            remove_operator(&env, &admin, &op);
+        });
     }
 
     #[test]
     fn test_reactivate_operator() {
-        let (env, admin) = setup();
+        let (env, admin, contract_id) = setup();
         let op = Address::generate(&env);
 
-        add_operator(&env, &admin, &op, String::from_str(&env, "Op 1"));
-        remove_operator(&env, &admin, &op);
-        assert!(!is_operator(&env, &op));
+        env.as_contract(&contract_id, || {
+            add_operator(&env, &admin, &op, String::from_str(&env, "Op 1"));
+            remove_operator(&env, &admin, &op);
+            assert!(!is_operator(&env, &op));
 
-        add_operator(&env, &admin, &op, String::from_str(&env, "Op 1 v2"));
-        assert!(is_operator(&env, &op));
+            add_operator(&env, &admin, &op, String::from_str(&env, "Op 1 v2"));
+            assert!(is_operator(&env, &op));
+        });
     }
 
     #[test]
     fn test_operator_event_emission() {
-        let (env, admin) = setup();
+        let (env, admin, contract_id) = setup();
         let op = Address::generate(&env);
-        add_operator(&env, &admin, &op, String::from_str(&env, "Event Op"));
+        env.as_contract(&contract_id, || {
+            add_operator(&env, &admin, &op, String::from_str(&env, "Event Op"));
+        });
     }
 }

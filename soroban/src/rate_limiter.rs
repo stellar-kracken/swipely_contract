@@ -2114,10 +2114,12 @@ mod tests {
             ConsumeResult::Rejected(RateLimitError::DailyValueLimitExceeded as u32)
         );
 
-        // Daily remaining must be unchanged — rejected transfers must not be recorded
-        let check = client.check_limit(&user, &1);
-        assert!(check.allowed);
-        assert_eq!(check.daily_remaining_value, DEFAULT_DAILY_LIMIT);
+        // The rejected amount must not be added to the value-used counter — a
+        // breach still triggers its documented side effects (cooldown, risk
+        // profile), so we read the raw usage record rather than check_limit,
+        // which would itself error out with CooldownActive right now.
+        let usage = client.get_user_usage(&user);
+        assert_eq!(usage.daily.value_used, 0);
     }
 
     // -----------------------------------------------------------------------

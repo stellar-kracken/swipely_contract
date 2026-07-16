@@ -261,129 +261,150 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::testutils::Ledger;
-    use soroban_sdk::{Address, Env};
+    use soroban_sdk::{contract, contractimpl, Address, Env};
 
-    fn setup() -> (Env, Address) {
+    #[contract]
+    struct TestContext;
+
+    #[contractimpl]
+    impl TestContext {}
+
+    fn setup() -> (Env, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
+        let contract_id = env.register_contract(None, TestContext);
         let admin = Address::generate(&env);
-        env.storage().instance().set(&keys::ADMIN, &admin);
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&keys::ADMIN, &admin);
+        });
         env.ledger().set_timestamp(1_000_000);
-        (env, admin)
+        (env, admin, contract_id)
     }
 
     #[test]
     fn test_create_window() {
-        let (env, admin) = setup();
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "price_dev_1h"),
-            1,
-            WindowUnit::Hours,
-            500,
-        );
-        let window = get_window(&env, &String::from_str(&env, "price_dev_1h"));
-        assert!(window.is_some());
-        let w = window.unwrap();
-        assert_eq!(w.threshold_bps, 500);
+        let (env, admin, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "price_dev_1h"),
+                1,
+                WindowUnit::Hours,
+                500,
+            );
+            let window = get_window(&env, &String::from_str(&env, "price_dev_1h"));
+            assert!(window.is_some());
+            let w = window.unwrap();
+            assert_eq!(w.threshold_bps, 500);
+        });
     }
 
     #[test]
     fn test_update_window() {
-        let (env, admin) = setup();
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win1"),
-            1,
-            WindowUnit::Hours,
-            500,
-        );
-        update_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win1"),
-            2,
-            WindowUnit::Hours,
-            300,
-        );
-        let window = get_window(&env, &String::from_str(&env, "win1")).unwrap();
-        assert_eq!(window.length, 2);
-        assert_eq!(window.threshold_bps, 300);
+        let (env, admin, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win1"),
+                1,
+                WindowUnit::Hours,
+                500,
+            );
+            update_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win1"),
+                2,
+                WindowUnit::Hours,
+                300,
+            );
+            let window = get_window(&env, &String::from_str(&env, "win1")).unwrap();
+            assert_eq!(window.length, 2);
+            assert_eq!(window.threshold_bps, 300);
+        });
     }
 
     #[test]
     fn test_remove_window() {
-        let (env, admin) = setup();
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win1"),
-            1,
-            WindowUnit::Hours,
-            500,
-        );
-        remove_window(&env, &admin, String::from_str(&env, "win1"));
-        let window = get_window(&env, &String::from_str(&env, "win1"));
-        assert!(window.is_none());
+        let (env, admin, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win1"),
+                1,
+                WindowUnit::Hours,
+                500,
+            );
+            remove_window(&env, &admin, String::from_str(&env, "win1"));
+            let window = get_window(&env, &String::from_str(&env, "win1"));
+            assert!(window.is_none());
+        });
     }
 
     #[test]
     fn test_get_all_windows() {
-        let (env, admin) = setup();
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win1"),
-            1,
-            WindowUnit::Hours,
-            500,
-        );
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win2"),
-            30,
-            WindowUnit::Minutes,
-            300,
-        );
-        let all = get_all_windows(&env);
-        assert_eq!(all.len(), 2);
+        let (env, admin, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win1"),
+                1,
+                WindowUnit::Hours,
+                500,
+            );
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win2"),
+                30,
+                WindowUnit::Minutes,
+                300,
+            );
+            let all = get_all_windows(&env);
+            assert_eq!(all.len(), 2);
+        });
     }
 
     #[test]
     fn test_evaluate_threshold_no_breach() {
-        let (env, admin) = setup();
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win1"),
-            1,
-            WindowUnit::Hours,
-            500,
-        );
-        let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_020_000);
-        assert!(eval.is_some());
-        let e = eval.unwrap();
-        assert!(!e.is_breached);
+        let (env, admin, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win1"),
+                1,
+                WindowUnit::Hours,
+                500,
+            );
+            let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_020_000);
+            assert!(eval.is_some());
+            let e = eval.unwrap();
+            assert!(!e.is_breached);
+        });
     }
 
     #[test]
     fn test_evaluate_threshold_breach() {
-        let (env, admin) = setup();
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win1"),
-            1,
-            WindowUnit::Hours,
-            500,
-        );
-        let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_100_000);
-        assert!(eval.is_some());
-        let e = eval.unwrap();
-        assert!(e.is_breached);
+        let (env, admin, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win1"),
+                1,
+                WindowUnit::Hours,
+                500,
+            );
+            let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_100_000);
+            assert!(eval.is_some());
+            let e = eval.unwrap();
+            assert!(e.is_breached);
+        });
     }
 
     #[test]
@@ -401,53 +422,59 @@ mod tests {
 
     #[test]
     fn test_create_duplicate_window_panics() {
-        let (env, admin) = setup();
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win1"),
-            1,
-            WindowUnit::Hours,
-            500,
-        );
+        let (env, admin, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win1"),
+                1,
+                WindowUnit::Hours,
+                500,
+            );
+        });
     }
 
     #[test]
     #[should_panic(expected = "window already exists")]
     fn test_create_duplicate_window_panics_impl() {
-        let (env, admin) = setup();
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win1"),
-            1,
-            WindowUnit::Hours,
-            500,
-        );
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win1"),
-            1,
-            WindowUnit::Hours,
-            500,
-        );
+        let (env, admin, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win1"),
+                1,
+                WindowUnit::Hours,
+                500,
+            );
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win1"),
+                1,
+                WindowUnit::Hours,
+                500,
+            );
+        });
     }
 
     #[test]
     fn test_evaluate_with_zero_reference() {
-        let (env, admin) = setup();
-        create_window(
-            &env,
-            &admin,
-            String::from_str(&env, "win1"),
-            1,
-            WindowUnit::Hours,
-            500,
-        );
-        let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 0, 100);
-        assert!(eval.is_some());
-        let e = eval.unwrap();
-        assert!(!e.is_breached);
+        let (env, admin, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            create_window(
+                &env,
+                &admin,
+                String::from_str(&env, "win1"),
+                1,
+                WindowUnit::Hours,
+                500,
+            );
+            let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 0, 100);
+            assert!(eval.is_some());
+            let e = eval.unwrap();
+            assert!(!e.is_breached);
+        });
     }
 }

@@ -1293,7 +1293,33 @@ impl BridgeWatchContract {
         bridge_uptime_score: u32,
     ) {
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
+        Self::submit_health_internal(
+            env,
+            caller,
+            asset_code,
+            health_score,
+            liquidity_score,
+            price_stability_score,
+            bridge_uptime_score,
+        );
+    }
 
+    /// Core of `submit_health`, without the `check_permission()` call.
+    ///
+    /// `submit_health_signed` already checks the caller's permission (and
+    /// thus calls `require_auth()`) before verifying the signature; calling
+    /// `submit_health` from there would require_auth() the same address
+    /// again within the same invocation, which soroban rejects ("frame is
+    /// already authorized").
+    fn submit_health_internal(
+        env: Env,
+        caller: Address,
+        asset_code: String,
+        health_score: u32,
+        liquidity_score: u32,
+        price_stability_score: u32,
+        bridge_uptime_score: u32,
+    ) {
         // Check if asset is locked
         Self::assert_asset_not_locked(&env, &asset_code);
 
@@ -1350,7 +1376,13 @@ impl BridgeWatchContract {
     /// the same ledger timestamp. A `health_up` event is emitted per asset.
     pub fn submit_health_batch(env: Env, caller: Address, records: Vec<HealthScoreBatch>) {
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
+        Self::submit_health_batch_internal(env, caller, records);
+    }
 
+    /// Core of `submit_health_batch`, without the `check_permission()` call —
+    /// see `submit_health_internal` for why `submit_health_batch_signed`
+    /// needs this.
+    fn submit_health_batch_internal(env: Env, caller: Address, records: Vec<HealthScoreBatch>) {
         if records.len() > 20 {
             panic!("batch size exceeds the maximum of 20 records");
         }
@@ -1417,7 +1449,18 @@ impl BridgeWatchContract {
         source: String,
     ) {
         Self::check_permission(&env, &caller, AdminRole::PriceSubmitter);
+        Self::submit_price_internal(env, caller, asset_code, price, source);
+    }
 
+    /// Core of `submit_price`, without the `check_permission()` call — see
+    /// `submit_health_internal` for why `submit_price_signed` needs this.
+    fn submit_price_internal(
+        env: Env,
+        caller: Address,
+        asset_code: String,
+        price: i128,
+        source: String,
+    ) {
         // Check if asset is locked
         Self::assert_asset_not_locked(&env, &asset_code);
 
@@ -1678,7 +1721,7 @@ impl BridgeWatchContract {
         );
         Self::verify_signature(env.clone(), message, signature);
 
-        Self::submit_health(
+        Self::submit_health_internal(
             env,
             caller,
             asset_code,
@@ -1710,7 +1753,7 @@ impl BridgeWatchContract {
 
         Self::verify_signature(env.clone(), message, signature);
 
-        Self::submit_price(env, caller, asset_code, price, source);
+        Self::submit_price_internal(env, caller, asset_code, price, source);
     }
 
     /// Submit a batch of health records with multi-sig support.
@@ -1737,7 +1780,7 @@ impl BridgeWatchContract {
 
         Self::verify_multi_sig(env.clone(), batch_message, signatures);
 
-        Self::submit_health_batch(env, caller, records);
+        Self::submit_health_batch_internal(env, caller, records);
     }
 
     /// Build canonical health payload bytes for signature coverage.
@@ -4456,6 +4499,24 @@ impl BridgeWatchContract {
         description: String,
     ) {
         caller.require_auth();
+        Self::set_config_internal(env, caller, category, name, value, description);
+    }
+
+    /// Core of `set_config`, without the `require_auth()` call.
+    ///
+    /// `set_config_bulk` already authorizes the caller once up front; calling
+    /// `set_config` per item would require_auth() the same address again
+    /// within the same invocation, which soroban rejects ("frame is already
+    /// authorized"). This lets both entrypoints share the same validation and
+    /// storage logic while only authorizing once each.
+    fn set_config_internal(
+        env: Env,
+        caller: Address,
+        category: ConfigCategory,
+        name: String,
+        value: i128,
+        description: String,
+    ) {
         Self::assert_not_globally_paused(&env);
         Self::check_no_pending_transfer(&env);
 
@@ -4608,7 +4669,7 @@ impl BridgeWatchContract {
         let keys: Vec<(ConfigCategory, String)> = env
             .storage()
             .instance()
-            .get(&keys::CONFIG_KEYS)
+            .get(&DataKey::ConfigKeys)
             .unwrap_or_else(|| Vec::new(&env));
 
         let mut entries: Vec<ConfigEntry> = Vec::new(&env);
@@ -4679,10 +4740,11 @@ impl BridgeWatchContract {
             panic!("config: bulk update list must contain at most 20 items");
         }
 
-        // Apply each update — uses the same logic as set_config()
+        // Apply each update — uses the same logic as set_config(), minus the
+        // auth check (already done once above; see set_config_internal).
         for i in 0..updates.len() {
             let u = updates.get(i).unwrap();
-            Self::set_config(
+            Self::set_config_internal(
                 env.clone(),
                 caller.clone(),
                 u.category,
@@ -4747,7 +4809,7 @@ impl BridgeWatchContract {
                 .get::<_, ConfigEntry>(&key)
                 .is_none()
             {
-                Self::set_config(
+                Self::set_config_internal(
                     env.clone(),
                     caller.clone(),
                     cat,
