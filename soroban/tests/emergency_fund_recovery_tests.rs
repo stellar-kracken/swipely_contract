@@ -10,7 +10,7 @@ mod tests {
         Address, Env, String,
     };
 
-    use crate::emergency_fund_recovery::{
+    use swipely_contracts::emergency_fund_recovery::{
         EmergencyFundRecovery, EmergencyRecovery, RecoveryAuthorization, RecoveryError,
         RecoveryStatus,
     };
@@ -349,7 +349,7 @@ mod tests {
 
         // Cancel recovery
         let result = EmergencyFundRecovery::cancel_recovery(
-            env,
+            env.clone(),
             user,
             recovery_id,
             String::from_slice(&env, "cancelled"),

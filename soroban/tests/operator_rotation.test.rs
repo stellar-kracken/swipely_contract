@@ -5,7 +5,7 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger},
     Address, Env, String,
 };
-use bridge_watch_contracts::operator_rotation::{
+use swipely_contracts::operator_rotation::{
     add_operator, get_active_operators, get_all_operators, get_operator, is_operator,
     remove_operator,
 };

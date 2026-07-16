@@ -1,9 +1,9 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
 
 // Import the contract and client
-use bridge_watch_soroban::{BridgeWatchContract, BridgeWatchContractClient};
+use swipely_contracts::{BridgeWatchContract, BridgeWatchContractClient};
 
 fn setup() -> (
     Env,
@@ -270,30 +270,30 @@ fn test_submit_health_requires_trusted_source_when_sources_registered() {
     client.grant_role(
         &admin,
         &trusted_source,
-        bridge_watch_soroban::AdminRole::HealthSubmitter,
+        &swipely_contracts::AdminRole::HealthSubmitter,
     );
     client.grant_role(
         &admin,
         &untrusted_source,
-        bridge_watch_soroban::AdminRole::HealthSubmitter,
+        &swipely_contracts::AdminRole::HealthSubmitter,
     );
 
     // Before registering any trusted sources, both should be able to submit
     client.submit_health(
         &trusted_source,
         &String::from_str(&env, "USDC"),
-        95,
-        90,
-        92,
-        88,
+        &95,
+        &90,
+        &92,
+        &88,
     );
     client.submit_health(
         &untrusted_source,
         &String::from_str(&env, "USDC"),
-        94,
-        89,
-        91,
-        87,
+        &94,
+        &89,
+        &91,
+        &87,
     );
 
     // Now register the trusted source
@@ -307,10 +307,10 @@ fn test_submit_health_requires_trusted_source_when_sources_registered() {
     client.submit_health(
         &trusted_source,
         &String::from_str(&env, "USDC"),
-        96,
-        91,
-        93,
-        89,
+        &96,
+        &91,
+        &93,
+        &89,
     );
 
     // Untrusted source should now fail (would panic with "caller is not a trusted source")
@@ -328,25 +328,25 @@ fn test_submit_price_requires_trusted_source_when_sources_registered() {
     client.grant_role(
         &admin,
         &trusted_source,
-        bridge_watch_soroban::AdminRole::PriceSubmitter,
+        &swipely_contracts::AdminRole::PriceSubmitter,
     );
     client.grant_role(
         &admin,
         &untrusted_source,
-        bridge_watch_soroban::AdminRole::PriceSubmitter,
+        &swipely_contracts::AdminRole::PriceSubmitter,
     );
 
     // Before registering any trusted sources, both should be able to submit
     client.submit_price(
         &trusted_source,
         &String::from_str(&env, "USDC"),
-        1_000_000,
+        &1_000_000,
         &String::from_str(&env, "oracle1"),
     );
     client.submit_price(
         &untrusted_source,
         &String::from_str(&env, "USDC"),
-        1_000_100,
+        &1_000_100,
         &String::from_str(&env, "oracle2"),
     );
 
@@ -361,7 +361,7 @@ fn test_submit_price_requires_trusted_source_when_sources_registered() {
     client.submit_price(
         &trusted_source,
         &String::from_str(&env, "USDC"),
-        1_000_200,
+        &1_000_200,
         &String::from_str(&env, "oracle1"),
     );
 
@@ -381,11 +381,11 @@ fn test_revoked_source_cannot_submit() {
     client.grant_role(
         &admin,
         &source,
-        bridge_watch_soroban::AdminRole::HealthSubmitter,
+        &swipely_contracts::AdminRole::HealthSubmitter,
     );
 
     // Should be able to submit
-    client.submit_health(&source, &String::from_str(&env, "USDC"), 95, 90, 92, 88);
+    client.submit_health(&source, &String::from_str(&env, "USDC"), &95, &90, &92, &88);
 
     // Revoke the source
     client.revoke_trusted_source(&admin, &source);
@@ -406,11 +406,11 @@ fn test_reactivated_source_can_submit_again() {
     client.grant_role(
         &admin,
         &source,
-        bridge_watch_soroban::AdminRole::HealthSubmitter,
+        &swipely_contracts::AdminRole::HealthSubmitter,
     );
 
     // Submit successfully
-    client.submit_health(&source, &String::from_str(&env, "USDC"), 95, 90, 92, 88);
+    client.submit_health(&source, &String::from_str(&env, "USDC"), &95, &90, &92, &88);
 
     // Revoke
     client.revoke_trusted_source(&admin, &source);
@@ -419,7 +419,7 @@ fn test_reactivated_source_can_submit_again() {
     client.register_trusted_source(&admin, &source, &String::from_str(&env, "Oracle v2"));
 
     // Should be able to submit again
-    client.submit_health(&source, &String::from_str(&env, "USDC"), 96, 91, 93, 89);
+    client.submit_health(&source, &String::from_str(&env, "USDC"), &96, &91, &93, &89);
 }
 
 #[test]
@@ -437,17 +437,17 @@ fn test_multiple_trusted_sources_can_all_submit() {
     client.grant_role(
         &admin,
         &source1,
-        bridge_watch_soroban::AdminRole::HealthSubmitter,
+        &swipely_contracts::AdminRole::HealthSubmitter,
     );
     client.grant_role(
         &admin,
         &source2,
-        bridge_watch_soroban::AdminRole::HealthSubmitter,
+        &swipely_contracts::AdminRole::HealthSubmitter,
     );
 
     // Both should be able to submit
-    client.submit_health(&source1, &String::from_str(&env, "USDC"), 95, 90, 92, 88);
-    client.submit_health(&source2, &String::from_str(&env, "USDC"), 94, 89, 91, 87);
+    client.submit_health(&source1, &String::from_str(&env, "USDC"), &95, &90, &92, &88);
+    client.submit_health(&source2, &String::from_str(&env, "USDC"), &94, &89, &91, &87);
 
     // Verify both submissions worked
     let health = client.get_health(&String::from_str(&env, "USDC"));
@@ -466,12 +466,12 @@ fn test_admin_can_always_submit_regardless_of_trust() {
     client.grant_role(
         &admin,
         &source,
-        bridge_watch_soroban::AdminRole::HealthSubmitter,
+        &swipely_contracts::AdminRole::HealthSubmitter,
     );
 
     // Admin should still be able to submit even without being a registered trusted source
     // (because admin has inherent permissions)
-    client.submit_health(&admin, &String::from_str(&env, "USDC"), 95, 90, 92, 88);
+    client.submit_health(&admin, &String::from_str(&env, "USDC"), &95, &90, &92, &88);
 
     // Verify submission worked
     let health = client.get_health(&String::from_str(&env, "USDC"));

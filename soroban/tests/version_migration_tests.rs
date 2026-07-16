@@ -10,7 +10,7 @@ mod tests {
         Address, Env, Map, String as SorobanString, Vec,
     };
 
-    use crate::version_migration_helper::{
+    use swipely_contracts::version_migration_helper::{
         EnhancedMigrationHelper, MigrationVersion, ValidationCheckpoint, MigrationError,
     };
 

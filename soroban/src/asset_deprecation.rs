@@ -188,7 +188,7 @@ impl AssetDeprecationContract {
     }
 
     /// Get deprecation configuration for an asset
-    pub fn get_deprecation_config(
+    fn get_deprecation_config(
         env: &Env,
         asset_code: &String,
     ) -> Result<DeprecationConfig, DeprecationError> {
@@ -199,7 +199,7 @@ impl AssetDeprecationContract {
     }
 
     /// Guard function to check if write operations are allowed
-    pub fn check_write_allowed(
+    fn check_write_allowed(
         env: &Env,
         asset_code: &String,
     ) -> Result<(), DeprecationError> {

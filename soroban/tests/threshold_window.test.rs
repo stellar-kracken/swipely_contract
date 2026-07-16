@@ -5,7 +5,7 @@ use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Env, String,
 };
-use bridge_watch_contracts::threshold_window::{
+use swipely_contracts::threshold_window::{
     create_window, evaluate_threshold, get_all_windows, get_window, get_window_seconds,
     remove_window, update_window, WindowConfig, WindowUnit,
 };

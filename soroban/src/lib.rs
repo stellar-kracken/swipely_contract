@@ -1,6 +1,13 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
+// Only needed by batch_query's test-only JSON serialization helpers below;
+// the wasm release build has no global allocator wired up (soroban-sdk's
+// bump allocator is opt-in via its "alloc" feature, which isn't enabled
+// here), so this must stay test-only rather than being declared unconditionally.
+#[cfg(test)]
+extern crate alloc;
+
 // governance and insurance_pool are standalone contracts — only compiled for
 // tests (native target) to avoid Wasm symbol conflicts with BridgeWatchContract.
 pub mod acl;
