@@ -1,5 +1,7 @@
 # Swipely — Smart Contracts
 
+[![CI](https://github.com/stellar-kracken/swipely_contract/actions/workflows/ci.yml/badge.svg)](https://github.com/stellar-kracken/swipely_contract/actions/workflows/ci.yml)
+
 **Soroban** smart contracts for **Swipely**, the cross-chain bridge and DEX
 liquidity monitoring platform on the Stellar network. These contracts provide the
 on-chain primitives the platform relies on — trusted source registries, asset
