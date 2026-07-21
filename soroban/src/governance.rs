@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
@@ -28,6 +28,17 @@ pub enum VoteChoice {
     For,
     Against,
     Abstain,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GovernanceEventType {
+    ConfigUpdated,
+    QuorumChanged,
+    ThresholdChanged,
+    VotingDelayChanged,
+    VotingPeriodChanged,
+    TimelockDelayChanged,
 }
 
 // ── Structs ───────────────────────────────────────────────────────────────────
@@ -123,10 +134,15 @@ impl GovernanceContract {
             !env.storage().instance().has(&DataKey::Admin),
             "already initialised"
         );
-        assert!(quorum_bps <= 10_000, "quorum > 100%");
-        assert!(
-            pass_threshold_bps <= 10_000 && pass_threshold_bps > 0,
-            "invalid threshold"
+
+        Self::validate_governance_params(
+            timelock_delay,
+            voting_period,
+            voting_delay,
+            quorum_bps,
+            pass_threshold_bps,
+            proposal_deposit,
+            guardian_threshold,
         );
 
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -145,6 +161,11 @@ impl GovernanceContract {
             guardian_threshold,
         };
         env.storage().instance().set(&DataKey::Config, &cfg);
+
+        env.events().publish(
+            (symbol_short!("gov"), symbol_short!("init")),
+            GovernanceEventType::ConfigUpdated,
+        );
     }
 
     // ── Voting-power management ───────────────────────────────────────────────
@@ -571,11 +592,32 @@ impl GovernanceContract {
         guardian_threshold: u32,
     ) {
         Self::only_admin(&env);
-        assert!(quorum_bps <= 10_000, "quorum > 100%");
-        assert!(
-            pass_threshold_bps <= 10_000 && pass_threshold_bps > 0,
-            "invalid threshold"
+
+        Self::validate_governance_params(
+            timelock_delay,
+            voting_period,
+            voting_delay,
+            quorum_bps,
+            pass_threshold_bps,
+            proposal_deposit,
+            guardian_threshold,
         );
+
+        let old_cfg: GovernanceConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .unwrap_or(GovernanceConfig {
+                timelock_delay: 0,
+                voting_period: 0,
+                voting_delay: 0,
+                quorum_bps: 0,
+                pass_threshold_bps: 0,
+                proposal_deposit: 0,
+                use_quadratic: false,
+                guardian_threshold: 0,
+            });
+
         let cfg = GovernanceConfig {
             timelock_delay,
             voting_period,
@@ -587,6 +629,46 @@ impl GovernanceContract {
             guardian_threshold,
         };
         env.storage().instance().set(&DataKey::Config, &cfg);
+
+        env.events().publish(
+            (symbol_short!("gov"), symbol_short!("cfg_upd")),
+            GovernanceEventType::ConfigUpdated,
+        );
+
+        if old_cfg.quorum_bps != quorum_bps {
+            env.events().publish(
+                (symbol_short!("gov"), symbol_short!("quorum")),
+                quorum_bps,
+            );
+        }
+
+        if old_cfg.pass_threshold_bps != pass_threshold_bps {
+            env.events().publish(
+                (symbol_short!("gov"), symbol_short!("thresh")),
+                pass_threshold_bps,
+            );
+        }
+
+        if old_cfg.voting_delay != voting_delay {
+            env.events().publish(
+                (symbol_short!("gov"), symbol_short!("delay")),
+                voting_delay,
+            );
+        }
+
+        if old_cfg.voting_period != voting_period {
+            env.events().publish(
+                (symbol_short!("gov"), symbol_short!("period")),
+                voting_period,
+            );
+        }
+
+        if old_cfg.timelock_delay != timelock_delay {
+            env.events().publish(
+                (symbol_short!("gov"), symbol_short!("tlock")),
+                timelock_delay,
+            );
+        }
     }
 
     // ── Getters ───────────────────────────────────────────────────────────────
@@ -721,6 +803,37 @@ impl GovernanceContract {
             y = (x + n / x) / 2;
         }
         x
+    }
+
+    /// Validate all governance parameters for consistency and acceptable ranges.
+    /// Parameters must satisfy:
+    /// - quorum_bps: 0 to 10000 (representing 0% to 100%)
+    /// - pass_threshold_bps: 1 to 10000 (must be > 0, representing at least 0.01% to 100%)
+    /// - voting_period: must be > 0 (in ledger seconds)
+    /// - voting_delay: must be >= 0 (in ledger seconds)
+    /// - timelock_delay: must be >= 0 (in ledger seconds)
+    /// - proposal_deposit: must be >= 0
+    /// - guardian_threshold: must be >= 0
+    fn validate_governance_params(
+        timelock_delay: u64,
+        voting_period: u64,
+        voting_delay: u64,
+        quorum_bps: u32,
+        pass_threshold_bps: u32,
+        proposal_deposit: i128,
+        guardian_threshold: u32,
+    ) {
+        assert!(quorum_bps <= 10_000, "quorum > 100%");
+        assert!(pass_threshold_bps > 0, "threshold must be > 0%");
+        assert!(
+            pass_threshold_bps <= 10_000,
+            "threshold > 100%"
+        );
+        assert!(voting_period > 0, "voting period must be non-zero");
+        assert!(voting_delay >= 0, "voting delay cannot be negative");
+        assert!(timelock_delay >= 0, "timelock delay cannot be negative");
+        assert!(proposal_deposit >= 0, "proposal deposit cannot be negative");
+        assert!(guardian_threshold >= 0, "guardian threshold cannot be negative");
     }
 }
 
@@ -1786,5 +1899,332 @@ mod tests {
         client.activate_proposal(&id);
         advance(&env, 300); // past end_time (voting_period = 200)
         client.cast_vote(&voter, &id, &VoteChoice::For);
+    }
+
+    // ── Validation tests for governance parameters ─────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "voting period must be non-zero")]
+    fn test_initialize_zero_voting_period_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &100, &0, &10, &1000, &5100, &100, &false, &2);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold must be > 0%")]
+    fn test_initialize_zero_threshold_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &100, &200, &10, &1000, &0, &100, &false, &2);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold > 100%")]
+    fn test_initialize_over_100_threshold_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &100, &200, &10, &1000, &10_001, &100, &false, &2);
+    }
+
+    #[test]
+    fn test_initialize_with_zero_voting_delay() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // Should not panic — voting_delay can be 0
+        client.initialize(&admin, &100, &200, &0, &1000, &5100, &100, &false, &2);
+        let cfg = client.get_config();
+        assert_eq!(cfg.voting_delay, 0);
+    }
+
+    #[test]
+    fn test_initialize_with_zero_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // Should not panic — timelock_delay can be 0
+        client.initialize(&admin, &0, &200, &10, &1000, &5100, &100, &false, &2);
+        let cfg = client.get_config();
+        assert_eq!(cfg.timelock_delay, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "voting period must be non-zero")]
+    fn test_update_config_zero_voting_period_panics() {
+        let (env, _admin, contract_id) = setup();
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        client.update_config(&100, &0, &10, &1000, &5100, &100, &false, &2);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold must be > 0%")]
+    fn test_update_config_zero_threshold_panics() {
+        let (env, _admin, contract_id) = setup();
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        client.update_config(&100, &200, &10, &1000, &0, &100, &false, &2);
+    }
+
+    #[test]
+    fn test_update_config_with_different_quorum() {
+        let (env, _admin, contract_id) = setup();
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let mut cfg = client.get_config();
+        assert_eq!(cfg.quorum_bps, 1000);
+
+        client.update_config(&100, &200, &10, &2000, &5100, &100, &false, &2);
+        cfg = client.get_config();
+        assert_eq!(cfg.quorum_bps, 2000);
+    }
+
+    #[test]
+    fn test_update_config_with_different_threshold() {
+        let (env, _admin, contract_id) = setup();
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let mut cfg = client.get_config();
+        assert_eq!(cfg.pass_threshold_bps, 5100);
+
+        client.update_config(&100, &200, &10, &1000, &6000, &100, &false, &2);
+        cfg = client.get_config();
+        assert_eq!(cfg.pass_threshold_bps, 6000);
+    }
+
+    #[test]
+    fn test_proposal_lifecycle_with_high_quorum() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        // Initialize with high quorum (50%)
+        client.initialize(&admin, &100, &200, &10, &5000, &5100, &100, &false, &2);
+
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        client.set_voting_power(&proposer, &1000);
+        client.set_voting_power(&voter, &1000);
+
+        let target = Address::generate(&env);
+        let id = client.create_proposal(
+            &proposer,
+            &ProposalType::ParameterChange,
+            &mk_str(&env, "title"),
+            &mk_str(&env, "desc"),
+            &target,
+            &mk_str(&env, "calldata"),
+        );
+
+        advance(&env, 10);
+        client.activate_proposal(&id);
+        client.cast_vote(&voter, &id, &VoteChoice::For);
+
+        // total_supply = 2000, votes_for = 1000
+        // quorum check: 1000 / 2000 = 50% >= 50% ✓
+        // threshold check: 1000 / 1000 = 100% >= 51% ✓
+        advance(&env, 201);
+        client.finalize_proposal(&id);
+        assert_eq!(client.get_proposal(&id).status, ProposalStatus::Passed);
+    }
+
+    #[test]
+    fn test_proposal_lifecycle_insufficient_quorum() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        // Initialize with high quorum requirement (80%)
+        client.initialize(&admin, &100, &200, &10, &8000, &5100, &100, &false, &2);
+
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let big_holder = Address::generate(&env);
+
+        client.set_voting_power(&proposer, &1000);
+        client.set_voting_power(&voter, &1000);
+        client.set_voting_power(&big_holder, &10_000);
+
+        let target = Address::generate(&env);
+        let id = client.create_proposal(
+            &proposer,
+            &ProposalType::ParameterChange,
+            &mk_str(&env, "title"),
+            &mk_str(&env, "desc"),
+            &target,
+            &mk_str(&env, "calldata"),
+        );
+
+        advance(&env, 10);
+        client.activate_proposal(&id);
+        client.cast_vote(&voter, &id, &VoteChoice::For);
+
+        // total_supply = 12000, votes_for = 1000
+        // quorum check: 1000 / 12000 = 8.33% < 80% → fails
+        advance(&env, 201);
+        client.finalize_proposal(&id);
+        assert_eq!(client.get_proposal(&id).status, ProposalStatus::Failed);
+    }
+
+    #[test]
+    fn test_proposal_lifecycle_with_low_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        // Initialize with low threshold (only 26%)
+        client.initialize(&admin, &100, &200, &10, &1000, &2600, &100, &false, &2);
+
+        let proposer = Address::generate(&env);
+        let v_for = Address::generate(&env);
+        let v_against = Address::generate(&env);
+
+        client.set_voting_power(&proposer, &1000);
+        client.set_voting_power(&v_for, &300);
+        client.set_voting_power(&v_against, &700);
+
+        let target = Address::generate(&env);
+        let id = client.create_proposal(
+            &proposer,
+            &ProposalType::ParameterChange,
+            &mk_str(&env, "title"),
+            &mk_str(&env, "desc"),
+            &target,
+            &mk_str(&env, "calldata"),
+        );
+
+        advance(&env, 10);
+        client.activate_proposal(&id);
+        client.cast_vote(&v_for, &id, &VoteChoice::For);
+        client.cast_vote(&v_against, &id, &VoteChoice::Against);
+
+        // total_supply = 2000, total_votes = 1000
+        // quorum: 1000 / 2000 = 50% >= 10% ✓
+        // threshold: 300 / 1000 = 30% >= 26% ✓
+        advance(&env, 201);
+        client.finalize_proposal(&id);
+        assert_eq!(client.get_proposal(&id).status, ProposalStatus::Passed);
+    }
+
+    #[test]
+    fn test_voting_delay_configuration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        // Initialize with custom voting_delay (50)
+        client.initialize(&admin, &100, &200, &50, &1000, &5100, &100, &false, &2);
+
+        let proposer = Address::generate(&env);
+        client.set_voting_power(&proposer, &1000);
+
+        let target = Address::generate(&env);
+        let id = client.create_proposal(
+            &proposer,
+            &ProposalType::ParameterChange,
+            &mk_str(&env, "title"),
+            &mk_str(&env, "desc"),
+            &target,
+            &mk_str(&env, "calldata"),
+        );
+
+        let p = client.get_proposal(&id);
+        let now = env.ledger().timestamp();
+        assert_eq!(p.start_time, now + 50);
+        assert_eq!(p.end_time, now + 50 + 200);
+    }
+
+    #[test]
+    fn test_multiple_parameter_updates() {
+        let (env, _admin, contract_id) = setup();
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        // Update all parameters
+        client.update_config(&150, &250, &15, &1500, &6000, &150, &true, &3);
+        let cfg = client.get_config();
+
+        assert_eq!(cfg.timelock_delay, 150);
+        assert_eq!(cfg.voting_period, 250);
+        assert_eq!(cfg.voting_delay, 15);
+        assert_eq!(cfg.quorum_bps, 1500);
+        assert_eq!(cfg.pass_threshold_bps, 6000);
+        assert_eq!(cfg.proposal_deposit, 150);
+        assert!(cfg.use_quadratic);
+        assert_eq!(cfg.guardian_threshold, 3);
+    }
+
+    #[test]
+    fn test_parameter_edge_case_minimum_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        // Initialize with minimum threshold (1 bps = 0.01%)
+        client.initialize(&admin, &100, &200, &10, &1000, &1, &100, &false, &2);
+        let cfg = client.get_config();
+        assert_eq!(cfg.pass_threshold_bps, 1);
+    }
+
+    #[test]
+    fn test_parameter_edge_case_maximum_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        // Initialize with maximum threshold (10000 bps = 100%)
+        client.initialize(&admin, &100, &200, &10, &1000, &10_000, &100, &false, &2);
+        let cfg = client.get_config();
+        assert_eq!(cfg.pass_threshold_bps, 10_000);
+    }
+
+    #[test]
+    fn test_parameter_edge_case_zero_quorum() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        // Initialize with zero quorum (0%)
+        client.initialize(&admin, &100, &200, &10, &0, &5100, &100, &false, &2);
+        let cfg = client.get_config();
+        assert_eq!(cfg.quorum_bps, 0);
+    }
+
+    #[test]
+    fn test_parameter_edge_case_maximum_quorum() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        // Initialize with maximum quorum (100%)
+        client.initialize(&admin, &100, &200, &10, &10_000, &5100, &100, &false, &2);
+        let cfg = client.get_config();
+        assert_eq!(cfg.quorum_bps, 10_000);
     }
 }
