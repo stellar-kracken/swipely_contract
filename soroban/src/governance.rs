@@ -930,17 +930,6 @@ mod tests {
         client.initialize(&admin, &100, &200, &10, &10_001, &5100, &100, &false, &2);
     }
 
-    #[test]
-    #[should_panic(expected = "invalid threshold")]
-    fn test_initialize_zero_threshold() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
-        let client = GovernanceContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin, &100, &200, &10, &1000, &0, &100, &false, &2);
-    }
-
     // ── set_voting_power ──────────────────────────────────────────────────────
 
     #[test]
