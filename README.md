@@ -40,6 +40,13 @@ cargo test
 The release profile is tuned for small wasm output (`opt-level = "z"`, LTO,
 symbol stripping) — see [`Cargo.toml`](./Cargo.toml).
 
+## Benchmarks
+
+Resource-usage (CPU instructions, memory, ledger footprint) benchmarks for
+the escrow, threshold-window, and source-trust hot paths live in
+[`BENCHMARKS.md`](./BENCHMARKS.md), which documents how to re-run them and
+records baseline numbers to compare against.
+
 ## Code style
 
 Formatting and lints are enforced across the workspace and run as their own
