@@ -40,6 +40,16 @@ cargo test
 The release profile is tuned for small wasm output (`opt-level = "z"`, LTO,
 symbol stripping) — see [`Cargo.toml`](./Cargo.toml).
 
+## Contract API reference
+
+Every public function under `soroban/src/` — arguments, authorization
+requirements, and emitted events — is documented in
+[`soroban/docs/API_REFERENCE.md`](./soroban/docs/API_REFERENCE.md), organized by
+contract and grouped by what's actually compiled into the deployed contract
+versus test-only or unreferenced code. The corresponding numeric error codes
+are consolidated in [`soroban/docs/ERRORS.md`](./soroban/docs/ERRORS.md),
+along with a check that each contract's codes are internally unique.
+
 ## Benchmarks
 
 Resource-usage (CPU instructions, memory, ledger footprint) benchmarks for
