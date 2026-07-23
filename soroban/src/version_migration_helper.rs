@@ -62,11 +62,30 @@ pub struct ValidationResult {
     pub checked_at: u64,
 }
 
+/// Outcome of a simulated migration produced by `dry_run_migration`. Never
+/// persisted to storage — purely informational.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DryRunReport {
+    pub current_version: MigrationVersion,
+    pub target_version: MigrationVersion,
+    /// `true` only if `issues` is empty, i.e. calling `begin_migration` with
+    /// the same arguments right now would succeed.
+    pub would_succeed: bool,
+    /// Every problem that would block the real migration, in check order.
+    pub issues: Vec<SorobanString>,
+    /// Non-blocking notes (e.g. caller-supplied storage-layout warnings).
+    pub warnings: Vec<SorobanString>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MigrationError {
     AlreadyAtVersion,
     VersionDowngradeNotAllowed,
+    /// The target skips one or more entire major versions (e.g. 1.x -> 3.x)
+    /// without passing `force`. See `VERSION_MIGRATION_POLICY.md`.
+    VersionSkipNotAllowed,
     UnauthorizedMigrator,
     ValidationFailed,
     RollbackNotAvailable,
@@ -74,6 +93,8 @@ pub enum MigrationError {
     SnapshotExpired,
     NoValidationResults,
     MigrationInProgress,
+    /// `cancel_migration` was called but no migration is in progress.
+    NoMigrationInProgress,
     StateIntegrityCheckFailed,
 }
 
@@ -189,10 +210,18 @@ impl EnhancedMigrationHelper {
 
     /**
      * Validate upgrade path
+     *
+     * Rules (see `VERSION_MIGRATION_POLICY.md`):
+     * - `to` must not equal `from` (`AlreadyAtVersion`, regardless of `force`).
+     * - `to` must be strictly greater than `from` in semver order, unless
+     *   `force` is `true` (otherwise `VersionDowngradeNotAllowed`).
+     * - `to.major` must not be more than one greater than `from.major`,
+     *   unless `force` is `true` (otherwise `VersionSkipNotAllowed`).
      */
     pub fn validate_upgrade(
         from: &MigrationVersion,
         to: &MigrationVersion,
+        force: bool,
     ) -> Result<(), MigrationError> {
         if from == to {
             return Err(MigrationError::AlreadyAtVersion);
@@ -206,57 +235,179 @@ impl EnhancedMigrationHelper {
             to.patch > from.patch
         };
 
-        if !is_forward {
+        if !is_forward && !force {
             return Err(MigrationError::VersionDowngradeNotAllowed);
+        }
+
+        if is_forward && to.major > from.major + 1 && !force {
+            return Err(MigrationError::VersionSkipNotAllowed);
         }
 
         Ok(())
     }
 
-    /**
-     * Begin migration with safety checks
-     */
-    pub fn begin_migration(
-        env: &Env,
-        migrator: Address,
-        // Reserved for wiring into `validate_upgrade` in a future change.
-        _target_version: MigrationVersion,
-    ) -> Result<(), MigrationError> {
-        migrator.require_auth();
-
-        // Check authorization
+    fn is_authorized_migrator(env: &Env, migrator: &Address) -> Result<bool, MigrationError> {
         let migrators_key = SorobanString::from_str(env, keys::AUTHORIZED_MIGRATORS);
         let migrators: Vec<Address> = env
             .storage()
             .persistent()
             .get::<SorobanString, Vec<Address>>(&migrators_key)
             .ok_or(MigrationError::UnauthorizedMigrator)?;
+        Ok(migrators.iter().any(|addr| addr == *migrator))
+    }
 
-        let is_authorized = migrators.iter().any(|addr| addr == migrator);
-        if !is_authorized {
+    fn is_migration_in_progress(env: &Env) -> bool {
+        let in_progress_key = SorobanString::from_str(env, keys::MIGRATION_IN_PROGRESS);
+        env.storage()
+            .instance()
+            .get::<SorobanString, bool>(&in_progress_key)
+            .unwrap_or(false)
+    }
+
+    /**
+     * Begin migration with safety checks
+     *
+     * Validates the target version via `validate_upgrade` (pass `force` to
+     * override a rejected downgrade or major-version skip), then sets the
+     * mutual-exclusion flag. If the migration doesn't complete (the caller
+     * never calls `complete_migration`), use `cancel_migration` to clear the
+     * flag and unblock future migrations.
+     */
+    pub fn begin_migration(
+        env: &Env,
+        migrator: Address,
+        target_version: MigrationVersion,
+        force: bool,
+    ) -> Result<(), MigrationError> {
+        migrator.require_auth();
+
+        if !Self::is_authorized_migrator(env, &migrator)? {
             return Err(MigrationError::UnauthorizedMigrator);
         }
 
-        // Check if migration already in progress
-        let in_progress_key = SorobanString::from_str(env, keys::MIGRATION_IN_PROGRESS);
-        if let Some(in_progress) = env
-            .storage()
-            .instance()
-            .get::<SorobanString, bool>(&in_progress_key)
-        {
-            if in_progress {
-                return Err(MigrationError::MigrationInProgress);
-            }
+        if Self::is_migration_in_progress(env) {
+            return Err(MigrationError::MigrationInProgress);
         }
 
+        let current_version = Self::get_version(env);
+        Self::validate_upgrade(&current_version, &target_version, force)?;
+
         // Set migration flag
+        let in_progress_key = SorobanString::from_str(env, keys::MIGRATION_IN_PROGRESS);
         env.storage().instance().set(&in_progress_key, &true);
 
         Ok(())
     }
 
     /**
+     * Cancel a stuck migration — the recovery path when a migration was
+     * begun (via `begin_migration`) but never completed, e.g. because the
+     * off-chain migration logic between the two calls failed. Clears the
+     * mutual-exclusion flag so a fresh `begin_migration` can proceed. Does
+     * not touch the stored version or history; pair with
+     * `rollback_to_snapshot` if the partial migration also needs its state
+     * reverted.
+     */
+    pub fn cancel_migration(env: &Env, migrator: Address) -> Result<(), MigrationError> {
+        migrator.require_auth();
+
+        if !Self::is_authorized_migrator(env, &migrator)? {
+            return Err(MigrationError::UnauthorizedMigrator);
+        }
+
+        if !Self::is_migration_in_progress(env) {
+            return Err(MigrationError::NoMigrationInProgress);
+        }
+
+        let in_progress_key = SorobanString::from_str(env, keys::MIGRATION_IN_PROGRESS);
+        env.storage().instance().remove(&in_progress_key);
+
+        env.events()
+            .publish((symbol_short!("migration"), "cancelled"), migrator);
+
+        Ok(())
+    }
+
+    /**
+     * Simulate a migration to `target_version` without mutating any
+     * contract state: checks authorization, mutual exclusion, and the
+     * version policy (the same checks `begin_migration` would run with the
+     * same `force` value), folds in any caller-supplied storage-layout
+     * `errors`/`warnings` (see `validate_state`), and reports every problem
+     * found instead of stopping at the first one.
+     */
+    pub fn dry_run_migration(
+        env: &Env,
+        migrator: Address,
+        target_version: MigrationVersion,
+        storage_errors: Vec<SorobanString>,
+        storage_warnings: Vec<SorobanString>,
+        force: bool,
+    ) -> DryRunReport {
+        let current_version = Self::get_version(env);
+        let mut issues = Vec::new(env);
+
+        match Self::is_authorized_migrator(env, &migrator) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                issues.push_back(SorobanString::from_str(
+                    env,
+                    "migrator is not in the authorized-migrators list",
+                ));
+            }
+        }
+
+        if Self::is_migration_in_progress(env) {
+            issues.push_back(SorobanString::from_str(
+                env,
+                "a migration is already in progress",
+            ));
+        }
+
+        match Self::validate_upgrade(&current_version, &target_version, force) {
+            Ok(()) => {}
+            Err(MigrationError::AlreadyAtVersion) => {
+                issues.push_back(SorobanString::from_str(
+                    env,
+                    "target version equals the current version",
+                ));
+            }
+            Err(MigrationError::VersionDowngradeNotAllowed) => {
+                issues.push_back(SorobanString::from_str(
+                    env,
+                    "target version is a downgrade (pass force to override)",
+                ));
+            }
+            Err(MigrationError::VersionSkipNotAllowed) => {
+                issues.push_back(SorobanString::from_str(
+                    env,
+                    "target version skips one or more major versions (pass force to override)",
+                ));
+            }
+            Err(_) => {}
+        }
+
+        for err in storage_errors.iter() {
+            issues.push_back(err);
+        }
+
+        let would_succeed = issues.is_empty();
+
+        DryRunReport {
+            current_version,
+            target_version,
+            would_succeed,
+            issues,
+            warnings: storage_warnings,
+        }
+    }
+
+    /**
      * Record migration completion
+     *
+     * Pass the same `force` value used at `begin_migration` so a migration
+     * that was legitimately begun as a forced downgrade/skip doesn't get
+     * rejected again here.
      */
     pub fn complete_migration(
         env: &Env,
@@ -264,9 +415,10 @@ impl EnhancedMigrationHelper {
         to_version: MigrationVersion,
         migrator: Address,
         notes: SorobanString,
+        force: bool,
     ) -> Result<(), MigrationError> {
         // Validate upgrade path
-        Self::validate_upgrade(&from_version, &to_version)?;
+        Self::validate_upgrade(&from_version, &to_version, force)?;
 
         // Update current version
         let version_key = SorobanString::from_str(env, keys::MIGRATION_VERSION);
@@ -517,7 +669,8 @@ impl EnhancedMigrationHelper {
  * - PATCH: Bug fixes or internal optimizations
  *
  * ### Migration Rules
- * 1. Forward-only upgrades allowed (no downgrading)
+ * 1. Forward-only upgrades allowed (no downgrading, no skipping an entire
+ *    major version) unless the caller explicitly passes `force = true`
  * 2. Each migration requires:
  *    - Pre-migration state snapshot
  *    - Pre-migration validation
@@ -525,13 +678,26 @@ impl EnhancedMigrationHelper {
  *    - Migration audit log entry
  * 3. Snapshots retained for 7 days for rollback capability
  * 4. Only authorized migrators can execute migrations
- * 5. Single migration at a time (mutual exclusion)
+ * 5. Single migration at a time (mutual exclusion) — use `dry_run_migration`
+ *    beforehand to preview whether a call would succeed without mutating
+ *    state, and `cancel_migration` to clear a stuck in-progress flag if a
+ *    migration fails partway between `begin_migration` and
+ *    `complete_migration`
  *
  * ### Rollback Procedure
  * 1. Snapshot must be available and not expired
  * 2. Admin approval required
  * 3. State restored to snapshot version
  * 4. Rollback event emitted for off-chain monitoring
+ *
+ * ### Recovery From a Partial Migration
+ * If `begin_migration` succeeds but `complete_migration` is never called
+ * (the off-chain migration logic failed or crashed), the contract is left
+ * with its mutual-exclusion flag set and no version change:
+ * 1. Call `cancel_migration` to clear the flag (any authorized migrator)
+ * 2. If the partial migration already mutated other contract state, restore
+ *    it from the pre-migration snapshot via `rollback_to_snapshot`
+ * 3. Investigate before retrying `begin_migration`
  *
  * ### Validation Checkpoints
  * 1. **PreMigration**: Validate current state is consistent
