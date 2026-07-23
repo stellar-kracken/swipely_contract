@@ -574,7 +574,7 @@ mod tests {
     fn setup_env() -> (Env, Address, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn test_initialize() {
         let (env, _admin, _op) = setup_env();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         let admin2 = Address::generate(&env);
@@ -650,7 +650,7 @@ mod tests {
     #[should_panic]
     fn test_double_initialize_panics() {
         let (env, admin, _op) = setup_env();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         client.initialize(&admin, &100u32, &500i128, &1_000i128);
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn test_register_bridge() {
         let (env, _admin, operator) = setup_env();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn test_commit_reserves() {
         let (env, _admin, operator) = setup_env();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn test_verify_proof_valid() {
         let (env, _admin, operator) = setup_env();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn test_verify_proof_invalid() {
         let (env, _admin, operator) = setup_env();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn test_batch_verify_proofs() {
         let (env, _admin, operator) = setup_env();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -776,7 +776,7 @@ mod tests {
     #[test]
     fn test_slash_operator() {
         let (env, _admin, operator) = setup_env();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -800,7 +800,7 @@ mod tests {
     #[test]
     fn test_update_config() {
         let (env, _admin, _op) = setup_env();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn test_challenge_and_resolve_slashes() {
         let (env, _admin, operator) = setup_env();
-        let contract_id = env.register_contract(None, BridgeReserveVerifier);
+        let contract_id = env.register(BridgeReserveVerifier, ());
         let client = BridgeReserveVerifierClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);

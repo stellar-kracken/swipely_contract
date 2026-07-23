@@ -1480,7 +1480,7 @@ mod tests {
     fn setup() -> (Env, AssetRegistryContractClient<'static>, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, AssetRegistryContract);
+        let contract_id = env.register(AssetRegistryContract, ());
         let client = AssetRegistryContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         env.ledger().set_timestamp(1_000_000);
@@ -1973,7 +1973,7 @@ mod tests {
     fn test_deactivate_unauthorized_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, AssetRegistryContract);
+        let contract_id = env.register(AssetRegistryContract, ());
         let client = AssetRegistryContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2000,7 +2000,7 @@ mod tests {
     fn test_restore_unauthorized_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, AssetRegistryContract);
+        let contract_id = env.register(AssetRegistryContract, ());
         let client = AssetRegistryContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2057,7 +2057,7 @@ mod tests {
     fn test_state_continuity_deactivate_restore() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, AssetRegistryContract);
+        let contract_id = env.register(AssetRegistryContract, ());
         let client = AssetRegistryContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);

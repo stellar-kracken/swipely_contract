@@ -39,7 +39,7 @@ fn setup() -> (
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
 
-    let contract_id = env.register_contract(None, TimeLockedEscrowContract);
+    let contract_id = env.register(TimeLockedEscrowContract, ());
     let client = TimeLockedEscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -58,7 +58,7 @@ fn setup() -> (
 
 fn verifier(env: &Env) -> (Address, MockBridgeVerifierClient<'static>, Address) {
     let verifier_admin = Address::generate(env);
-    let verifier_id = env.register_contract(None, MockBridgeVerifier);
+    let verifier_id = env.register(MockBridgeVerifier, ());
     let verifier_client = MockBridgeVerifierClient::new(env, &verifier_id);
     (verifier_id, verifier_client, verifier_admin)
 }

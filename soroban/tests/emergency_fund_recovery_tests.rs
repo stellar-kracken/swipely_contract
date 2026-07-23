@@ -2,7 +2,6 @@
  * Emergency Fund Recovery Tests
  * Comprehensive tests for the emergency fund recovery functionality
  */
-
 #[cfg(test)]
 mod tests {
     use soroban_sdk::{
@@ -30,7 +29,7 @@ mod tests {
         env.mock_all_auths();
         let admin = Address::generate(&env);
         let user = Address::generate(&env);
-        let contract_id = env.register_contract(None, TestContext);
+        let contract_id = env.register(TestContext, ());
 
         // Mock ledger setup
         env.ledger().set_timestamp(1_000_000);
@@ -174,7 +173,7 @@ mod tests {
                 destination,
                 token_address,
                 1000,
-                String::from_slice(&env, "test recovery"),
+                String::from_str(&env, "test recovery"),
             )
         });
 
@@ -224,7 +223,7 @@ mod tests {
                 destination,
                 token_address,
                 0, // Invalid amount
-                String::from_slice(&env, "test recovery"),
+                String::from_str(&env, "test recovery"),
             )
         });
 
@@ -271,7 +270,7 @@ mod tests {
                 user, // Same as initiator
                 token_address,
                 1000,
-                String::from_slice(&env, "test recovery"),
+                String::from_str(&env, "test recovery"),
             )
         });
 
@@ -318,7 +317,7 @@ mod tests {
                 destination,
                 token_address,
                 1000,
-                String::from_slice(&env, "emergency recovery"),
+                String::from_str(&env, "emergency recovery"),
             )
         });
 
@@ -366,7 +365,7 @@ mod tests {
                     destination,
                     token_address,
                     1000,
-                    String::from_slice(&env, "emergency recovery"),
+                    String::from_str(&env, "emergency recovery"),
                 )
             })
             .expect("Recovery initiation should succeed");
@@ -416,7 +415,7 @@ mod tests {
                     destination,
                     token_address,
                     1000,
-                    String::from_slice(&env, "emergency recovery"),
+                    String::from_str(&env, "emergency recovery"),
                 )
             })
             .expect("Recovery initiation should succeed");
@@ -427,7 +426,7 @@ mod tests {
                 env.clone(),
                 user,
                 recovery_id,
-                String::from_slice(&env, "cancelled"),
+                String::from_str(&env, "cancelled"),
             )
         });
 
@@ -471,7 +470,7 @@ mod tests {
                     destination.clone(),
                     token_address.clone(),
                     1000,
-                    String::from_slice(&env, "emergency recovery"),
+                    String::from_str(&env, "emergency recovery"),
                 )
             })
             .expect("Recovery initiation should succeed");

@@ -764,7 +764,7 @@ mod test {
         env.mock_all_auths();
         env.ledger().set_timestamp(1_000_000);
 
-        let contract_id = env.register_contract(None, InsurancePoolContract);
+        let contract_id = env.register(InsurancePoolContract, ());
         let client = InsurancePoolContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);

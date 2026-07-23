@@ -85,9 +85,12 @@ mod keys {
     pub const STATE_SNAPSHOTS: &str = "state_snapshots";
     pub const VALIDATION_RESULTS: &str = "validation_results";
     pub const MIGRATION_IN_PROGRESS: &str = "mig_in_progress";
+    // Reserved storage keys for planned features not yet wired up.
+    #[allow(dead_code)]
     pub const LAST_MIGRATION_TIMESTAMP: &str = "last_mig_timestamp";
     pub const AUTHORIZED_MIGRATORS: &str = "auth_migrators";
     pub const MIGRATION_TIMEOUT_SECONDS: &str = "mig_timeout";
+    #[allow(dead_code)]
     pub const SNAPSHOT_RETENTION_DAYS: &str = "snapshot_retention";
 }
 
@@ -216,7 +219,8 @@ impl EnhancedMigrationHelper {
     pub fn begin_migration(
         env: &Env,
         migrator: Address,
-        target_version: MigrationVersion,
+        // Reserved for wiring into `validate_upgrade` in a future change.
+        _target_version: MigrationVersion,
     ) -> Result<(), MigrationError> {
         migrator.require_auth();
 

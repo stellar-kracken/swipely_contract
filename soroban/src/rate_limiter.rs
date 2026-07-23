@@ -1221,7 +1221,7 @@ mod tests {
     fn setup() -> (Env, RateLimiterContractClient<'static>, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RateLimiterContract);
+        let contract_id = env.register(RateLimiterContract, ());
         let client = RateLimiterContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         env.ledger().set_timestamp(1_000_000);

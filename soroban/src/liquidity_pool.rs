@@ -800,7 +800,7 @@ mod tests {
     fn setup() -> (Env, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, TestContext);
+        let contract_id = env.register(TestContext, ());
         (env, contract_id)
     }
 
@@ -930,7 +930,7 @@ mod tests {
             );
 
             let pools = get_registered_pools(&env);
-            assert!(pools.len() >= 1);
+            assert!(!pools.is_empty());
             let found = pools.iter().find(|p| p == &pool_id);
             assert!(found.is_some());
         });
@@ -1216,7 +1216,7 @@ mod tests {
             );
 
             let daily = get_daily_history(&env, pool_id, 0, u64::MAX);
-            assert!(daily.len() >= 1);
+            assert!(!daily.is_empty());
 
             let bucket = daily.get(0).unwrap();
             assert_eq!(bucket.total_volume, 150 * PRECISION);

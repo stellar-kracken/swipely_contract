@@ -1112,7 +1112,7 @@ mod tests {
         // Deploy a Stellar Asset Contract for the fee token.
         let fee_token = env.register_stellar_asset_contract_v2(admin.clone()).address();
 
-        let contract = env.register_contract(None, FeeDistributionContract);
+        let contract = env.register(FeeDistributionContract, ());
         let client = FeeDistributionContractClient::new(&env, &contract);
 
         let ratios = DistributionRatios {

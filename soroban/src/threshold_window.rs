@@ -272,7 +272,7 @@ mod tests {
     fn setup() -> (Env, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, TestContext);
+        let contract_id = env.register(TestContext, ());
         let admin = Address::generate(&env);
         env.as_contract(&contract_id, || {
             env.storage().instance().set(&keys::ADMIN, &admin);

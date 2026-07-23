@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, String, Vec};
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
@@ -112,15 +112,23 @@ pub enum DataKey {
 
 // ── Events ────────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 const EVENT_PAUSE_TRIGGERED: &str = "cb_pause_triggered";
 #[allow(dead_code)]
 const EVENT_PAUSE_LIFTED: &str = "cb_pause_lifted";
+#[allow(dead_code)]
 const EVENT_GUARDIAN_ADDED: &str = "cb_guardian_added";
+#[allow(dead_code)]
 const EVENT_GUARDIAN_REMOVED: &str = "cb_guardian_removed";
+#[allow(dead_code)]
 const EVENT_GUARDIAN_APPROVED: &str = "cb_guardian_approved";
+#[allow(dead_code)]
 const EVENT_RECOVERY_REQUESTED: &str = "cb_recovery_requested";
+#[allow(dead_code)]
 const EVENT_RECOVERY_EXECUTED: &str = "cb_recovery_executed";
+#[allow(dead_code)]
 const EVENT_TRIGGER_CONFIG_UPDATED: &str = "cb_trigger_updated";
+#[allow(dead_code)]
 const EVENT_WHITELIST_UPDATED: &str = "cb_whitelist_updated";
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -709,7 +717,7 @@ mod tests {
     ) {
         let env = create_test_env();
         let (admin, guardian1, guardian2, user) = create_test_addresses(&env);
-        let contract_id = env.register_contract(None, CircuitBreakerContract);
+        let contract_id = env.register(CircuitBreakerContract, ());
         let client = CircuitBreakerContractClient::new(&env, &contract_id);
         (env, contract_id, client, admin, guardian1, guardian2, user)
     }

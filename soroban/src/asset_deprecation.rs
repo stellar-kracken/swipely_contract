@@ -199,6 +199,8 @@ impl AssetDeprecationContract {
     }
 
     /// Guard function to check if write operations are allowed
+    // Not yet wired into the write-path entrypoints below.
+    #[allow(dead_code)]
     fn check_write_allowed(env: &Env, asset_code: &String) -> Result<(), DeprecationError> {
         if let Ok(config) = Self::get_deprecation_config(env, asset_code) {
             if config.read_only {

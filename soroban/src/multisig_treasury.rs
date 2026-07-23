@@ -610,7 +610,7 @@ mod tests {
     fn setup() -> (Env, MultiSigTreasuryContractClient<'static>, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, MultiSigTreasuryContract);
+        let contract_id = env.register(MultiSigTreasuryContract, ());
         let client = MultiSigTreasuryContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 

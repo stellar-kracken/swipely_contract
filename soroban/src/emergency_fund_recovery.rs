@@ -8,10 +8,17 @@ use soroban_sdk::{
     token::Client as TokenClient, Address, Env, String, Symbol, Vec,
 };
 
+// Reserved event-topic symbols for planned recovery events; publish() calls
+// below currently use inline string topics instead.
+#[allow(dead_code)]
 const EVENT_RECOVERY_INITIATED: Symbol = symbol_short!("rec_init");
+#[allow(dead_code)]
 const EVENT_RECOVERY_APPROVED: Symbol = symbol_short!("rec_app");
+#[allow(dead_code)]
 const EVENT_RECOVERY_EXECUTED: Symbol = symbol_short!("rec_exec");
+#[allow(dead_code)]
 const EVENT_RECOVERY_CANCELLED: Symbol = symbol_short!("rec_can");
+#[allow(dead_code)]
 const EVENT_RECOVERY_HISTORY: Symbol = symbol_short!("rec_his");
 
 const DEFAULT_RECOVERY_TIMELOCK_SECONDS: u64 = 172_800; // 48 hours

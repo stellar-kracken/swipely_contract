@@ -322,7 +322,7 @@ mod tests {
     fn test_analytics_register_metric_and_history() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, AnalyticsAggregatorContract);
+        let contract_id = env.register(AnalyticsAggregatorContract, ());
         let client = AnalyticsAggregatorContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -349,7 +349,7 @@ mod tests {
     fn test_dashboard_summary_and_custom_metrics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, AnalyticsAggregatorContract);
+        let contract_id = env.register(AnalyticsAggregatorContract, ());
         let client = AnalyticsAggregatorContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 

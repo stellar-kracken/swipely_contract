@@ -19,7 +19,7 @@ fn setup() -> (
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
 
-    let contract_id = env.register_contract(None, BridgeWatchContract);
+    let contract_id = env.register(BridgeWatchContract, ());
     let client = BridgeWatchContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -198,7 +198,7 @@ fn test_source_registration_audit_trail() {
 
 #[test]
 fn test_non_admin_cannot_register_source() {
-    let (_env, client, _admin, source, non_admin) = setup();
+    let (_env, _client, _admin, _source, _non_admin) = setup();
 
     // Non-admin tries to register (should fail with auth)
     // Note: In real scenario, this would fail auth check
@@ -208,7 +208,7 @@ fn test_non_admin_cannot_register_source() {
 
 #[test]
 fn test_non_admin_cannot_revoke_source() {
-    let (_env, client, admin, source, non_admin) = setup();
+    let (_env, client, admin, source, _non_admin) = setup();
 
     // Admin registers source
     client.register_trusted_source(&admin, &source, &String::from_str(&_env, "Test Oracle"));

@@ -23,7 +23,7 @@ fn setup() -> (Env, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
-    let contract_id = env.register_contract(None, TestContract);
+    let contract_id = env.register(TestContract, ());
     env.as_contract(&contract_id, || {
         env.storage().instance().set(&"admin", &admin);
     });
