@@ -2,7 +2,6 @@
  * Version Migration Helper Tests
  * Comprehensive tests for contract state migration functionality
  */
-
 #[cfg(test)]
 mod tests {
     use soroban_sdk::{
@@ -30,7 +29,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
-        let contract_id = env.register_contract(None, TestContext);
+        let contract_id = env.register(TestContext, ());
         env.ledger().set_timestamp(1_000_000);
         (env, admin, contract_id)
     }
@@ -312,8 +311,9 @@ mod tests {
     fn test_get_snapshots() {
         let (env, _, contract_id) = setup_env();
 
-        let snapshots =
-            env.as_contract(&contract_id, || EnhancedMigrationHelper::get_snapshots(&env));
+        let snapshots = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::get_snapshots(&env)
+        });
 
         assert_eq!(snapshots.len(), 0, "Initial snapshots should be empty");
     }

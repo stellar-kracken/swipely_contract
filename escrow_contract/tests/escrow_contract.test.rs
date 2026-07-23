@@ -1,7 +1,11 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String, contract, contractimpl, symbol_short, Vec};
 use escrow_contract::{TimeLockedEscrowContract, TimeLockedEscrowContractClient};
+use soroban_sdk::{
+    contract, contractimpl, symbol_short,
+    testutils::{Address as _, Ledger},
+    Address, Env, String, Vec,
+};
 
 #[contract]
 pub struct MockBridgeVerifier;
@@ -10,7 +14,9 @@ pub struct MockBridgeVerifier;
 impl MockBridgeVerifier {
     pub fn set_verified(env: Env, admin: Address, reference: String, verified: bool) {
         admin.require_auth();
-        env.storage().instance().set(&(symbol_short!("ref"), reference), &verified);
+        env.storage()
+            .instance()
+            .set(&(symbol_short!("ref"), reference), &verified);
     }
 
     pub fn is_verified(env: Env, reference: String) -> bool {
@@ -33,7 +39,7 @@ fn setup() -> (
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
 
-    let contract_id = env.register_contract(None, TimeLockedEscrowContract);
+    let contract_id = env.register(TimeLockedEscrowContract, ());
     let client = TimeLockedEscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -52,7 +58,7 @@ fn setup() -> (
 
 fn verifier(env: &Env) -> (Address, MockBridgeVerifierClient<'static>, Address) {
     let verifier_admin = Address::generate(env);
-    let verifier_id = env.register_contract(None, MockBridgeVerifier);
+    let verifier_id = env.register(MockBridgeVerifier, ());
     let verifier_client = MockBridgeVerifierClient::new(env, &verifier_id);
     (verifier_id, verifier_client, verifier_admin)
 }
@@ -68,28 +74,26 @@ fn create_and_release_after_lock_and_verification() {
     let asset = String::from_str(&env, "USDC");
     client.set_lock_period(&admin, &bridge, &asset, &120u64);
 
-    let escrow_id = client
-        .create_escrow(
-            &depositor,
-            &recipient,
-            &bridge,
-            &asset,
-            &100_000i128,
-            &String::from_str(&env, "tx:abc"),
-            &verifier_id,
-            &String::from_str(&env, "proof:1"),
-        );
+    let escrow_id = client.create_escrow(
+        &depositor,
+        &recipient,
+        &bridge,
+        &asset,
+        &100_000i128,
+        &String::from_str(&env, "tx:abc"),
+        &verifier_id,
+        &String::from_str(&env, "proof:1"),
+    );
 
     let early = client.try_release_escrow(&recipient, &escrow_id, &99_000i128);
     assert!(early.is_err());
 
-    verifier_client.set_verified(
-        &verifier_admin,
-        &String::from_str(&env, "proof:1"),
-        &true,
+    verifier_client.set_verified(&verifier_admin, &String::from_str(&env, "proof:1"), &true);
+    client.sync_verification(
+        &verifier_id,
+        &escrow_id,
+        &verifier_client.is_verified(&String::from_str(&env, "proof:1")),
     );
-    client
-        .sync_verification(&verifier_id, &escrow_id, &verifier_client.is_verified(&String::from_str(&env, "proof:1")));
 
     env.ledger().set_timestamp(1_000_130);
     let released = client.release_escrow(&recipient, &escrow_id, &50_000i128);
@@ -107,19 +111,22 @@ fn challenge_then_multisig_resolve_release_path() {
     let recipient = Address::generate(&env);
     let challenger = Address::generate(&env);
 
-    let escrow_id = client
-        .create_escrow(
-            &depositor,
-            &recipient,
-            &String::from_str(&env, "bridge-a"),
-            &String::from_str(&env, "XLM"),
-            &50_000,
-            &String::from_str(&env, "meta"),
-            &verifier_id,
-            &String::from_str(&env, "proof:2"),
-        );
+    let escrow_id = client.create_escrow(
+        &depositor,
+        &recipient,
+        &String::from_str(&env, "bridge-a"),
+        &String::from_str(&env, "XLM"),
+        &50_000,
+        &String::from_str(&env, "meta"),
+        &verifier_id,
+        &String::from_str(&env, "proof:2"),
+    );
 
-    client.challenge_escrow(&challenger, &escrow_id, &String::from_str(&env, "suspicious"));
+    client.challenge_escrow(
+        &challenger,
+        &escrow_id,
+        &String::from_str(&env, "suspicious"),
+    );
 
     let r1 = client.resolve_challenge(&approver_1, &escrow_id, &true);
     assert!(!r1);
@@ -142,17 +149,16 @@ fn dispute_reject_then_refund() {
     let recipient = Address::generate(&_env);
     let challenger = Address::generate(&_env);
 
-    let escrow_id = client
-        .create_escrow(
-            &depositor,
-            &recipient,
-            &String::from_str(&_env, "bridge-r"),
-            &String::from_str(&_env, "USDT"),
-            &10_000,
-            &String::from_str(&_env, "meta"),
-            &verifier_id,
-            &String::from_str(&_env, "proof:3"),
-        );
+    let escrow_id = client.create_escrow(
+        &depositor,
+        &recipient,
+        &String::from_str(&_env, "bridge-r"),
+        &String::from_str(&_env, "USDT"),
+        &10_000,
+        &String::from_str(&_env, "meta"),
+        &verifier_id,
+        &String::from_str(&_env, "proof:3"),
+    );
     client.challenge_escrow(&challenger, &escrow_id, &String::from_str(&_env, "bad"));
 
     client.resolve_challenge(&approver_1, &escrow_id, &false);
@@ -170,34 +176,32 @@ fn batch_release_and_fee_collection() {
     let recipient = Address::generate(&env);
 
     client.set_lock_period(
-            &admin,
-            &String::from_str(&env, "bridge-b"),
-            &String::from_str(&env, "EURC"),
-            &1,
-        );
+        &admin,
+        &String::from_str(&env, "bridge-b"),
+        &String::from_str(&env, "EURC"),
+        &1,
+    );
 
-    let e1 = client
-        .create_escrow(
-            &depositor,
-            &recipient,
-            &String::from_str(&env, "bridge-b"),
-            &String::from_str(&env, "EURC"),
-            &1_000,
-            &String::from_str(&env, "m1"),
-            &verifier_id,
-            &String::from_str(&env, "proof:4"),
-        );
-    let e2 = client
-        .create_escrow(
-            &depositor,
-            &recipient,
-            &String::from_str(&env, "bridge-b"),
-            &String::from_str(&env, "EURC"),
-            &2_000,
-            &String::from_str(&env, "m2"),
-            &verifier_id,
-            &String::from_str(&env, "proof:5"),
-        );
+    let e1 = client.create_escrow(
+        &depositor,
+        &recipient,
+        &String::from_str(&env, "bridge-b"),
+        &String::from_str(&env, "EURC"),
+        &1_000,
+        &String::from_str(&env, "m1"),
+        &verifier_id,
+        &String::from_str(&env, "proof:4"),
+    );
+    let e2 = client.create_escrow(
+        &depositor,
+        &recipient,
+        &String::from_str(&env, "bridge-b"),
+        &String::from_str(&env, "EURC"),
+        &2_000,
+        &String::from_str(&env, "m2"),
+        &verifier_id,
+        &String::from_str(&env, "proof:5"),
+    );
 
     client.sync_verification(&verifier_id, &e1, &true);
     client.sync_verification(&verifier_id, &e2, &true);
@@ -222,17 +226,16 @@ fn emergency_recovery_requires_pause() {
     let depositor = Address::generate(&env);
     let recipient = Address::generate(&env);
 
-    let escrow_id = client
-        .create_escrow(
-            &depositor,
-            &recipient,
-            &String::from_str(&env, "bridge-x"),
-            &String::from_str(&env, "XLM"),
-            &8_000,
-            &String::from_str(&env, "meta"),
-            &verifier_id,
-            &String::from_str(&env, "proof:6"),
-        );
+    let escrow_id = client.create_escrow(
+        &depositor,
+        &recipient,
+        &String::from_str(&env, "bridge-x"),
+        &String::from_str(&env, "XLM"),
+        &8_000,
+        &String::from_str(&env, "meta"),
+        &verifier_id,
+        &String::from_str(&env, "proof:6"),
+    );
 
     assert!(client
         .try_emergency_recover(&admin, &escrow_id, &recipient, &100)

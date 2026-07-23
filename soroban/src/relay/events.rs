@@ -16,7 +16,7 @@ pub fn emit_message_sent(
 ) {
     env.events().publish(
         (symbol_short!("msg_sent"), sender.clone()),
-        (message_id.clone(), dest_chain.clone()),
+        (message_id.clone(), *dest_chain),
     );
 }
 
@@ -29,7 +29,7 @@ pub fn emit_message_status_changed(
 ) {
     env.events().publish(
         (symbol_short!("msg_stat"),),
-        (message_id.clone(), old_status.clone(), new_status.clone()),
+        (message_id.clone(), *old_status, *new_status),
     );
 }
 
@@ -55,10 +55,8 @@ pub fn emit_operator_deactivated(env: &Env, operator: &Address) {
 
 /// Emitted when a state proof is verified.
 pub fn emit_state_proof_verified(env: &Env, chain_id: &ChainId, block_number: u64) {
-    env.events().publish(
-        (symbol_short!("st_proof"),),
-        (chain_id.clone(), block_number),
-    );
+    env.events()
+        .publish((symbol_short!("st_proof"),), (*chain_id, block_number));
 }
 
 /// Emitted when a batch relay completes.

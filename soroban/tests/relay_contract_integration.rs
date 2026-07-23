@@ -1,4 +1,9 @@
 #![cfg(test)]
+// relay/mod.rs's send_message mirrors CrossChainMessage's fields as a public
+// contract entrypoint; the arg count is intentional (see the allow in that
+// file). This binary is its own crate root via `#[path]`, so the module-wide
+// allow there doesn't reach the macro-generated code checked here.
+#![allow(clippy::too_many_arguments)]
 
 #[path = "../src/relay/mod.rs"]
 mod relay;
@@ -17,7 +22,7 @@ fn setup_context() -> (Env, soroban_sdk::Address, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, CrossChainRelayContract);
+    let contract_id = env.register(CrossChainRelayContract, ());
     let client = CrossChainRelayContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);

@@ -1,5 +1,9 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
+// GuardianRole variant names in circuit_breaker.rs keep the shared `Guardian`
+// postfix intentionally; it's part of a public contract type's ABI/XDR spec,
+// so renaming would be a breaking change.
+#![allow(clippy::enum_variant_names)]
 
 // Only needed by batch_query's test-only JSON serialization helpers below;
 // the wasm release build has no global allocator wired up (soroban-sdk's
@@ -14,9 +18,9 @@ pub mod acl;
 #[cfg(test)]
 pub mod analytics_aggregator;
 #[cfg(test)]
-pub mod asset_registry;
-#[cfg(test)]
 pub mod asset_deprecation;
+#[cfg(test)]
+pub mod asset_registry;
 #[cfg(test)]
 pub mod batch_query;
 #[cfg(test)]
@@ -8902,7 +8906,7 @@ mod tests {
     fn setup() -> (Env, BridgeWatchContractClient<'static>, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, BridgeWatchContract);
+        let contract_id = env.register(BridgeWatchContract, ());
         let client = BridgeWatchContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -10162,7 +10166,7 @@ mod tests {
     fn test_initialize() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, BridgeWatchContract);
+        let contract_id = env.register(BridgeWatchContract, ());
         let client = BridgeWatchContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -10176,7 +10180,7 @@ mod tests {
     fn test_register_and_get_assets() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, BridgeWatchContract);
+        let contract_id = env.register(BridgeWatchContract, ());
         let client = BridgeWatchContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -10197,7 +10201,7 @@ mod tests {
     fn test_submit_and_get_health() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, BridgeWatchContract);
+        let contract_id = env.register(BridgeWatchContract, ());
         let client = BridgeWatchContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);

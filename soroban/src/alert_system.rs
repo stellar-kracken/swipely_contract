@@ -522,7 +522,7 @@ mod tests {
     fn setup() -> (Env, soroban_sdk::Address, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, AlertSystemContract);
+        let contract_id = env.register(AlertSystemContract, ());
         let client = AlertSystemContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin);

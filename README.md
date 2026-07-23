@@ -40,6 +40,24 @@ cargo test
 The release profile is tuned for small wasm output (`opt-level = "z"`, LTO,
 symbol stripping) — see [`Cargo.toml`](./Cargo.toml).
 
+## Code style
+
+Formatting and lints are enforced across the workspace and run as their own
+CI job:
+
+```bash
+# Formatting (settings in rustfmt.toml)
+cargo fmt --all -- --check
+
+# Lints, with warnings treated as errors
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+Run `cargo fmt --all` to format locally before committing. Where a lint is
+intentionally suppressed (e.g. a public contract entrypoint's argument count,
+or a reserved-for-later constant), the `#[allow(...)]` is accompanied by a
+comment explaining why.
+
 ## Related repositories
 
 - [`swipely_frontend`](https://github.com/stellar-kracken/swipely_frontend) — dashboard UI

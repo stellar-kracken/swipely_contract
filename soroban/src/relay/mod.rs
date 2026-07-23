@@ -245,7 +245,7 @@ impl CrossChainRelayContract {
         let message = CrossChainMessage {
             message_id: message_id.clone(),
             source_chain,
-            dest_chain: dest_chain.clone(),
+            dest_chain,
             sender: sender.clone(),
             payload,
             nonce,
@@ -282,7 +282,7 @@ impl CrossChainRelayContract {
         let mut message = get_message_or_err(&env, &message_id)?;
 
         if is_expired(&env, &message) {
-            let old_status = message.status.clone();
+            let old_status = message.status;
             message.status = MessageStatus::Expired;
             env.storage()
                 .persistent()
@@ -309,7 +309,7 @@ impl CrossChainRelayContract {
             return Err(RelayError::InvalidStateProof);
         }
 
-        let old_status = message.status.clone();
+        let old_status = message.status;
         message.status = MessageStatus::Verified;
         env.storage()
             .persistent()
@@ -356,7 +356,7 @@ impl CrossChainRelayContract {
         require_initialized(&env)?;
         operator.require_auth();
 
-        if items.len() == 0 {
+        if items.is_empty() {
             return Err(RelayError::EmptyBatch);
         }
 
@@ -469,7 +469,7 @@ impl CrossChainRelayContract {
                     && (msg.status == MessageStatus::Pending
                         || msg.status == MessageStatus::Verified)
                 {
-                    let old = msg.status.clone();
+                    let old = msg.status;
                     msg.status = MessageStatus::Expired;
                     env.storage()
                         .persistent()
@@ -711,7 +711,7 @@ fn relay_message_internal(
     let mut message = get_message_or_err(env, message_id)?;
 
     if is_expired(env, &message) {
-        let old_status = message.status.clone();
+        let old_status = message.status;
         message.status = MessageStatus::Expired;
         env.storage()
             .persistent()
@@ -726,7 +726,7 @@ fn relay_message_internal(
 
     verify_operator_signature(env, message_id, &relay_operator.public_key, signature)?;
 
-    let old_status = message.status.clone();
+    let old_status = message.status;
     message.status = MessageStatus::Relayed;
     env.storage()
         .persistent()
@@ -917,7 +917,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, CrossChainRelayContract);
+        let contract_id = env.register(CrossChainRelayContract, ());
         let client = CrossChainRelayContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1119,7 +1119,7 @@ mod tests {
     fn test_double_initialize_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let cid = env.register_contract(None, CrossChainRelayContract);
+        let cid = env.register(CrossChainRelayContract, ());
         let client = CrossChainRelayContractClient::new(&env, &cid);
         let admin = Address::generate(&env);
 
@@ -1132,7 +1132,7 @@ mod tests {
     fn test_initialize_zero_ttl_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let cid = env.register_contract(None, CrossChainRelayContract);
+        let cid = env.register(CrossChainRelayContract, ());
         let client = CrossChainRelayContractClient::new(&env, &cid);
         let admin = Address::generate(&env);
 

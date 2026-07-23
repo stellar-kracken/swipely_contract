@@ -272,7 +272,7 @@ mod tests {
     fn setup() -> (Env, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, TestContext);
+        let contract_id = env.register(TestContext, ());
         let admin = Address::generate(&env);
         env.as_contract(&contract_id, || {
             env.storage().instance().set(&keys::ADMIN, &admin);
@@ -393,7 +393,8 @@ mod tests {
                 WindowUnit::Hours,
                 500,
             );
-            let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_020_000);
+            let eval =
+                evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_020_000);
             assert!(eval.is_some());
             let e = eval.unwrap();
             assert!(!e.is_breached);
@@ -412,7 +413,8 @@ mod tests {
                 WindowUnit::Hours,
                 500,
             );
-            let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_100_000);
+            let eval =
+                evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_100_000);
             assert!(eval.is_some());
             let e = eval.unwrap();
             assert!(e.is_breached);

@@ -683,11 +683,9 @@ impl ReputationSystemContract {
 
         // Calculate dispute history score
         let total_disputes = disputes_won + disputes_lost;
-        let dispute_history_score = if total_disputes == 0 {
-            7500 // Neutral score if no disputes
-        } else {
-            disputes_won * REPUTATION_SCALE / total_disputes
-        };
+        let dispute_history_score = (disputes_won * REPUTATION_SCALE)
+            .checked_div(total_disputes)
+            .unwrap_or(7500); // Neutral score if no disputes
 
         // Update factor scores with exponential moving average
         let alpha = 20; // Smoothing factor
@@ -834,7 +832,7 @@ mod tests {
     fn setup() -> (Env, ReputationSystemContractClient<'static>, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ReputationSystemContract);
+        let contract_id = env.register(ReputationSystemContract, ());
         let client = ReputationSystemContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let config = Config::default();

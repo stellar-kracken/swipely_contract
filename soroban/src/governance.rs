@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
@@ -603,20 +603,20 @@ impl GovernanceContract {
             guardian_threshold,
         );
 
-        let old_cfg: GovernanceConfig = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config)
-            .unwrap_or(GovernanceConfig {
-                timelock_delay: 0,
-                voting_period: 0,
-                voting_delay: 0,
-                quorum_bps: 0,
-                pass_threshold_bps: 0,
-                proposal_deposit: 0,
-                use_quadratic: false,
-                guardian_threshold: 0,
-            });
+        let old_cfg: GovernanceConfig =
+            env.storage()
+                .instance()
+                .get(&DataKey::Config)
+                .unwrap_or(GovernanceConfig {
+                    timelock_delay: 0,
+                    voting_period: 0,
+                    voting_delay: 0,
+                    quorum_bps: 0,
+                    pass_threshold_bps: 0,
+                    proposal_deposit: 0,
+                    use_quadratic: false,
+                    guardian_threshold: 0,
+                });
 
         let cfg = GovernanceConfig {
             timelock_delay,
@@ -636,10 +636,8 @@ impl GovernanceContract {
         );
 
         if old_cfg.quorum_bps != quorum_bps {
-            env.events().publish(
-                (symbol_short!("gov"), symbol_short!("quorum")),
-                quorum_bps,
-            );
+            env.events()
+                .publish((symbol_short!("gov"), symbol_short!("quorum")), quorum_bps);
         }
 
         if old_cfg.pass_threshold_bps != pass_threshold_bps {
@@ -650,10 +648,8 @@ impl GovernanceContract {
         }
 
         if old_cfg.voting_delay != voting_delay {
-            env.events().publish(
-                (symbol_short!("gov"), symbol_short!("delay")),
-                voting_delay,
-            );
+            env.events()
+                .publish((symbol_short!("gov"), symbol_short!("delay")), voting_delay);
         }
 
         if old_cfg.voting_period != voting_period {
@@ -815,25 +811,21 @@ impl GovernanceContract {
     /// - proposal_deposit: must be >= 0
     /// - guardian_threshold: must be >= 0
     fn validate_governance_params(
-        timelock_delay: u64,
+        // Unsigned; their only documented constraint (">= 0") is enforced by
+        // the type system, so they aren't asserted on below.
+        _timelock_delay: u64,
         voting_period: u64,
-        voting_delay: u64,
+        _voting_delay: u64,
         quorum_bps: u32,
         pass_threshold_bps: u32,
         proposal_deposit: i128,
-        guardian_threshold: u32,
+        _guardian_threshold: u32,
     ) {
         assert!(quorum_bps <= 10_000, "quorum > 100%");
         assert!(pass_threshold_bps > 0, "threshold must be > 0%");
-        assert!(
-            pass_threshold_bps <= 10_000,
-            "threshold > 100%"
-        );
+        assert!(pass_threshold_bps <= 10_000, "threshold > 100%");
         assert!(voting_period > 0, "voting period must be non-zero");
-        assert!(voting_delay >= 0, "voting delay cannot be negative");
-        assert!(timelock_delay >= 0, "timelock delay cannot be negative");
         assert!(proposal_deposit >= 0, "proposal deposit cannot be negative");
-        assert!(guardian_threshold >= 0, "guardian threshold cannot be negative");
     }
 }
 
@@ -850,7 +842,7 @@ mod tests {
     fn setup() -> (Env, Address, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -924,7 +916,7 @@ mod tests {
     fn test_initialize_invalid_quorum() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin, &100, &200, &10, &10_001, &5100, &100, &false, &2);
@@ -1261,7 +1253,7 @@ mod tests {
     fn test_quadratic_voting() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -1829,7 +1821,7 @@ mod tests {
         // via quadratic voting path
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -1897,7 +1889,7 @@ mod tests {
     fn test_initialize_zero_voting_period_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin, &100, &0, &10, &1000, &5100, &100, &false, &2);
@@ -1908,7 +1900,7 @@ mod tests {
     fn test_initialize_zero_threshold_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin, &100, &200, &10, &1000, &0, &100, &false, &2);
@@ -1919,7 +1911,7 @@ mod tests {
     fn test_initialize_over_100_threshold_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin, &100, &200, &10, &1000, &10_001, &100, &false, &2);
@@ -1929,7 +1921,7 @@ mod tests {
     fn test_initialize_with_zero_voting_delay() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         // Should not panic — voting_delay can be 0
@@ -1942,7 +1934,7 @@ mod tests {
     fn test_initialize_with_zero_timelock() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         // Should not panic — timelock_delay can be 0
@@ -1995,7 +1987,7 @@ mod tests {
     fn test_proposal_lifecycle_with_high_quorum() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -2034,7 +2026,7 @@ mod tests {
     fn test_proposal_lifecycle_insufficient_quorum() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -2074,7 +2066,7 @@ mod tests {
     fn test_proposal_lifecycle_with_low_threshold() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -2116,7 +2108,7 @@ mod tests {
     fn test_voting_delay_configuration() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -2165,7 +2157,7 @@ mod tests {
     fn test_parameter_edge_case_minimum_threshold() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -2179,7 +2171,7 @@ mod tests {
     fn test_parameter_edge_case_maximum_threshold() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -2193,7 +2185,7 @@ mod tests {
     fn test_parameter_edge_case_zero_quorum() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -2207,7 +2199,7 @@ mod tests {
     fn test_parameter_edge_case_maximum_quorum() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, GovernanceContract);
+        let contract_id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 

@@ -1,6 +1,9 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env, String,
+};
 
 // Import the contract and client
 use swipely_contracts::{BridgeWatchContract, BridgeWatchContractClient};
@@ -16,7 +19,7 @@ fn setup() -> (
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
 
-    let contract_id = env.register_contract(None, BridgeWatchContract);
+    let contract_id = env.register(BridgeWatchContract, ());
     let client = BridgeWatchContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -195,7 +198,7 @@ fn test_source_registration_audit_trail() {
 
 #[test]
 fn test_non_admin_cannot_register_source() {
-    let (_env, client, _admin, source, non_admin) = setup();
+    let (_env, _client, _admin, _source, _non_admin) = setup();
 
     // Non-admin tries to register (should fail with auth)
     // Note: In real scenario, this would fail auth check
@@ -205,7 +208,7 @@ fn test_non_admin_cannot_register_source() {
 
 #[test]
 fn test_non_admin_cannot_revoke_source() {
-    let (_env, client, admin, source, non_admin) = setup();
+    let (_env, client, admin, source, _non_admin) = setup();
 
     // Admin registers source
     client.register_trusted_source(&admin, &source, &String::from_str(&_env, "Test Oracle"));
@@ -447,8 +450,22 @@ fn test_multiple_trusted_sources_can_all_submit() {
     );
 
     // Both should be able to submit
-    client.submit_health(&source1, &String::from_str(&env, "USDC"), &95, &90, &92, &88);
-    client.submit_health(&source2, &String::from_str(&env, "USDC"), &94, &89, &91, &87);
+    client.submit_health(
+        &source1,
+        &String::from_str(&env, "USDC"),
+        &95,
+        &90,
+        &92,
+        &88,
+    );
+    client.submit_health(
+        &source2,
+        &String::from_str(&env, "USDC"),
+        &94,
+        &89,
+        &91,
+        &87,
+    );
 
     // Verify both submissions worked
     let health = client.get_health(&String::from_str(&env, "USDC"));

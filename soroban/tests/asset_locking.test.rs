@@ -1,6 +1,9 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env, String,
+};
 
 // Import the contract and client
 use swipely_contracts::{AdminRole, BridgeWatchContract, BridgeWatchContractClient};
@@ -16,7 +19,7 @@ fn setup() -> (
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
 
-    let contract_id = env.register_contract(None, BridgeWatchContract);
+    let contract_id = env.register(BridgeWatchContract, ());
     let client = BridgeWatchContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
