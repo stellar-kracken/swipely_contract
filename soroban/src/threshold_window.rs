@@ -393,7 +393,8 @@ mod tests {
                 WindowUnit::Hours,
                 500,
             );
-            let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_020_000);
+            let eval =
+                evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_020_000);
             assert!(eval.is_some());
             let e = eval.unwrap();
             assert!(!e.is_breached);
@@ -412,7 +413,8 @@ mod tests {
                 WindowUnit::Hours,
                 500,
             );
-            let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_100_000);
+            let eval =
+                evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_100_000);
             assert!(eval.is_some());
             let e = eval.unwrap();
             assert!(e.is_breached);

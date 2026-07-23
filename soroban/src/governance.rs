@@ -603,20 +603,20 @@ impl GovernanceContract {
             guardian_threshold,
         );
 
-        let old_cfg: GovernanceConfig = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config)
-            .unwrap_or(GovernanceConfig {
-                timelock_delay: 0,
-                voting_period: 0,
-                voting_delay: 0,
-                quorum_bps: 0,
-                pass_threshold_bps: 0,
-                proposal_deposit: 0,
-                use_quadratic: false,
-                guardian_threshold: 0,
-            });
+        let old_cfg: GovernanceConfig =
+            env.storage()
+                .instance()
+                .get(&DataKey::Config)
+                .unwrap_or(GovernanceConfig {
+                    timelock_delay: 0,
+                    voting_period: 0,
+                    voting_delay: 0,
+                    quorum_bps: 0,
+                    pass_threshold_bps: 0,
+                    proposal_deposit: 0,
+                    use_quadratic: false,
+                    guardian_threshold: 0,
+                });
 
         let cfg = GovernanceConfig {
             timelock_delay,
@@ -636,10 +636,8 @@ impl GovernanceContract {
         );
 
         if old_cfg.quorum_bps != quorum_bps {
-            env.events().publish(
-                (symbol_short!("gov"), symbol_short!("quorum")),
-                quorum_bps,
-            );
+            env.events()
+                .publish((symbol_short!("gov"), symbol_short!("quorum")), quorum_bps);
         }
 
         if old_cfg.pass_threshold_bps != pass_threshold_bps {
@@ -650,10 +648,8 @@ impl GovernanceContract {
         }
 
         if old_cfg.voting_delay != voting_delay {
-            env.events().publish(
-                (symbol_short!("gov"), symbol_short!("delay")),
-                voting_delay,
-            );
+            env.events()
+                .publish((symbol_short!("gov"), symbol_short!("delay")), voting_delay);
         }
 
         if old_cfg.voting_period != voting_period {
@@ -825,15 +821,15 @@ impl GovernanceContract {
     ) {
         assert!(quorum_bps <= 10_000, "quorum > 100%");
         assert!(pass_threshold_bps > 0, "threshold must be > 0%");
-        assert!(
-            pass_threshold_bps <= 10_000,
-            "threshold > 100%"
-        );
+        assert!(pass_threshold_bps <= 10_000, "threshold > 100%");
         assert!(voting_period > 0, "voting period must be non-zero");
         assert!(voting_delay >= 0, "voting delay cannot be negative");
         assert!(timelock_delay >= 0, "timelock delay cannot be negative");
         assert!(proposal_deposit >= 0, "proposal deposit cannot be negative");
-        assert!(guardian_threshold >= 0, "guardian threshold cannot be negative");
+        assert!(
+            guardian_threshold >= 0,
+            "guardian threshold cannot be negative"
+        );
     }
 }
 

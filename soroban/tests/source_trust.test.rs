@@ -1,6 +1,9 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env, String,
+};
 
 // Import the contract and client
 use swipely_contracts::{BridgeWatchContract, BridgeWatchContractClient};
@@ -447,8 +450,22 @@ fn test_multiple_trusted_sources_can_all_submit() {
     );
 
     // Both should be able to submit
-    client.submit_health(&source1, &String::from_str(&env, "USDC"), &95, &90, &92, &88);
-    client.submit_health(&source2, &String::from_str(&env, "USDC"), &94, &89, &91, &87);
+    client.submit_health(
+        &source1,
+        &String::from_str(&env, "USDC"),
+        &95,
+        &90,
+        &92,
+        &88,
+    );
+    client.submit_health(
+        &source2,
+        &String::from_str(&env, "USDC"),
+        &94,
+        &89,
+        &91,
+        &87,
+    );
 
     // Verify both submissions worked
     let health = client.get_health(&String::from_str(&env, "USDC"));

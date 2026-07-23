@@ -1275,7 +1275,6 @@ mod tests {
     fn test_get_registered_pools_multiple() {
         let (env, contract_id) = setup();
         env.as_contract(&contract_id, || {
-
             for pool_name in ["POOL_0", "POOL_1", "POOL_2"] {
                 let pool_id = String::from_str(&env, pool_name);
                 record_pool_state(

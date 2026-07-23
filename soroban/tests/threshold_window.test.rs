@@ -137,9 +137,8 @@ fn test_evaluate_no_breach() {
             500,
         );
         // 2% deviation, threshold 5% (500 bps) — no breach
-        let eval =
-            evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_020_000)
-                .unwrap();
+        let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_020_000)
+            .unwrap();
         assert!(!eval.is_breached);
     });
 }
@@ -158,9 +157,8 @@ fn test_evaluate_breach() {
             500,
         );
         // 10% deviation, threshold 5% (500 bps) — breach; breach_bps = 1000
-        let eval =
-            evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_100_000)
-                .unwrap();
+        let eval = evaluate_threshold(&env, &String::from_str(&env, "win1"), 1_000_000, 1_100_000)
+            .unwrap();
         assert!(eval.is_breached);
         assert_eq!(eval.breach_bps, 1_000);
     });
@@ -234,38 +232,115 @@ fn test_max_windows_limit() {
 
     // Each create_window calls require_auth() — needs its own as_contract frame
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win0"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win0"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win1"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win1"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win2"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win2"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win3"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win3"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win4"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win4"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win5"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win5"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win6"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win6"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win7"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win7"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win8"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win8"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win9"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win9"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
     // 11th window exceeds MAX_WINDOWS (10) — should panic
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, "win10"), 1, WindowUnit::Hours, 100);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, "win10"),
+            1,
+            WindowUnit::Hours,
+            100,
+        );
     });
 }
 
@@ -340,7 +415,14 @@ fn test_create_empty_id_panics() {
     let (env, admin, contract_id) = setup();
 
     env.as_contract(&contract_id, || {
-        create_window(&env, &admin, String::from_str(&env, ""), 1, WindowUnit::Hours, 500);
+        create_window(
+            &env,
+            &admin,
+            String::from_str(&env, ""),
+            1,
+            WindowUnit::Hours,
+            500,
+        );
     });
 }
 

@@ -312,8 +312,9 @@ mod tests {
     fn test_get_snapshots() {
         let (env, _, contract_id) = setup_env();
 
-        let snapshots =
-            env.as_contract(&contract_id, || EnhancedMigrationHelper::get_snapshots(&env));
+        let snapshots = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::get_snapshots(&env)
+        });
 
         assert_eq!(snapshots.len(), 0, "Initial snapshots should be empty");
     }

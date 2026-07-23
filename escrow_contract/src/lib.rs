@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, String,
+    Symbol, Vec,
 };
 
 const BPS_DENOMINATOR: i128 = 10_000;
@@ -133,12 +133,20 @@ impl TimeLockedEscrowContract {
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::FeeCollector, &fee_collector);
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeCollector, &fee_collector);
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
-        env.storage().instance().set(&DataKey::Approvers, &approvers);
-        env.storage().instance().set(&DataKey::ApprovalThreshold, &approval_threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::Approvers, &approvers);
+        env.storage()
+            .instance()
+            .set(&DataKey::ApprovalThreshold, &approval_threshold);
         env.storage().instance().set(&DataKey::EscrowSeq, &0u64);
-        env.storage().instance().set(&DataKey::EmergencyPause, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyPause, &false);
         env.storage().instance().set(&DataKey::AccruedFees, &0i128);
         Ok(())
     }
@@ -155,20 +163,30 @@ impl TimeLockedEscrowContract {
             return Err(EscrowError::InvalidLockConfig);
         }
 
-        env.storage()
-            .instance()
-            .set(&DataKey::LockPeriod(bridge_id.clone(), asset_type.clone()), &lock_secs);
-        env.events()
-            .publish((EVENT_LOCK_CONFIG_SET, admin), (bridge_id, asset_type, lock_secs));
+        env.storage().instance().set(
+            &DataKey::LockPeriod(bridge_id.clone(), asset_type.clone()),
+            &lock_secs,
+        );
+        env.events().publish(
+            (EVENT_LOCK_CONFIG_SET, admin),
+            (bridge_id, asset_type, lock_secs),
+        );
         Ok(())
     }
 
-    pub fn set_fee_config(env: Env, admin: Address, fee_collector: Address, fee_bps: u32) -> Result<(), EscrowError> {
+    pub fn set_fee_config(
+        env: Env,
+        admin: Address,
+        fee_collector: Address,
+        fee_bps: u32,
+    ) -> Result<(), EscrowError> {
         require_admin(&env, &admin)?;
         if fee_bps > 2_000 {
             return Err(EscrowError::FeeConfigInvalid);
         }
-        env.storage().instance().set(&DataKey::FeeCollector, &fee_collector);
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeCollector, &fee_collector);
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
         Ok(())
     }
@@ -183,14 +201,20 @@ impl TimeLockedEscrowContract {
         if approvers.is_empty() || approval_threshold == 0 || approval_threshold > approvers.len() {
             return Err(EscrowError::InvalidDisputeDecision);
         }
-        env.storage().instance().set(&DataKey::Approvers, &approvers);
-        env.storage().instance().set(&DataKey::ApprovalThreshold, &approval_threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::Approvers, &approvers);
+        env.storage()
+            .instance()
+            .set(&DataKey::ApprovalThreshold, &approval_threshold);
         Ok(())
     }
 
     pub fn set_emergency_pause(env: Env, admin: Address, paused: bool) -> Result<(), EscrowError> {
         require_admin(&env, &admin)?;
-        env.storage().instance().set(&DataKey::EmergencyPause, &paused);
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyPause, &paused);
         Ok(())
     }
 
@@ -246,15 +270,23 @@ impl TimeLockedEscrowContract {
             verified: false,
         };
 
-        let accrued: i128 = env.storage().instance().get(&DataKey::AccruedFees).unwrap_or(0);
+        let accrued: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccruedFees)
+            .unwrap_or(0);
         env.storage()
             .instance()
             .set(&DataKey::AccruedFees, &(accrued + fee_total));
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
 
         env.events().publish(
             (EVENT_ESCROW_CREATED, depositor, recipient),
-            (escrow_id, bridge_id, asset_type, amount, fee_total, lock_until),
+            (
+                escrow_id, bridge_id, asset_type, amount, fee_total, lock_until,
+            ),
         );
         Ok(escrow_id)
     }
@@ -270,12 +302,20 @@ impl TimeLockedEscrowContract {
         if verifier_contract != escrow.verification_contract {
             return Err(EscrowError::NotAuthorized);
         }
-        if matches!(escrow.status, EscrowStatus::Released | EscrowStatus::Refunded) {
+        if matches!(
+            escrow.status,
+            EscrowStatus::Released | EscrowStatus::Refunded
+        ) {
             return Err(EscrowError::InvalidEscrowState);
         }
         escrow.verified = verified;
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
-        env.events().publish((EVENT_VERIFICATION_SYNCED, verifier_contract), (escrow_id, verified));
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.events().publish(
+            (EVENT_VERIFICATION_SYNCED, verifier_contract),
+            (escrow_id, verified),
+        );
         Ok(())
     }
 
@@ -306,13 +346,17 @@ impl TimeLockedEscrowContract {
             reason,
             timestamp: env.ledger().timestamp(),
         };
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         env.storage()
             .instance()
             .set(&DataKey::Challenge(escrow_id), &challenge);
 
-        env.events()
-            .publish((EVENT_ESCROW_CHALLENGED, challenger), (escrow_id, challenge.timestamp));
+        env.events().publish(
+            (EVENT_ESCROW_CHALLENGED, challenger),
+            (escrow_id, challenge.timestamp),
+        );
         Ok(())
     }
 
@@ -331,7 +375,11 @@ impl TimeLockedEscrowContract {
             return Err(EscrowError::NoChallenge);
         }
 
-        let required: u32 = env.storage().instance().get(&DataKey::ApprovalThreshold).unwrap_or(1);
+        let required: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ApprovalThreshold)
+            .unwrap_or(1);
         let mut dispute: DisputeResolution = env
             .storage()
             .instance()
@@ -362,8 +410,12 @@ impl TimeLockedEscrowContract {
             }
         }
 
-        env.storage().instance().set(&DataKey::Dispute(escrow_id), &dispute);
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Dispute(escrow_id), &dispute);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         env.events().publish(
             (EVENT_CHALLENGE_RESOLVED, approver),
             (
@@ -404,7 +456,10 @@ impl TimeLockedEscrowContract {
         if caller != escrow.recipient && caller != admin {
             return Err(EscrowError::NotAuthorized);
         }
-        if matches!(escrow.status, EscrowStatus::Refunded | EscrowStatus::Released) {
+        if matches!(
+            escrow.status,
+            EscrowStatus::Refunded | EscrowStatus::Released
+        ) {
             return Err(EscrowError::InvalidEscrowState);
         }
         if matches!(escrow.status, EscrowStatus::Challenged) {
@@ -433,7 +488,9 @@ impl TimeLockedEscrowContract {
         if escrow.released_amount >= releasable_total {
             escrow.status = EscrowStatus::Released;
         }
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         env.events().publish(
             (EVENT_ESCROW_RELEASED, caller),
             (escrow_id, release_amount, escrow.released_amount),
@@ -483,7 +540,10 @@ impl TimeLockedEscrowContract {
         if caller != escrow.depositor && caller != admin {
             return Err(EscrowError::NotAuthorized);
         }
-        if matches!(escrow.status, EscrowStatus::Released | EscrowStatus::Refunded) {
+        if matches!(
+            escrow.status,
+            EscrowStatus::Released | EscrowStatus::Refunded
+        ) {
             return Err(EscrowError::InvalidEscrowState);
         }
 
@@ -509,7 +569,9 @@ impl TimeLockedEscrowContract {
         }
 
         escrow.status = EscrowStatus::Refunded;
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         env.events()
             .publish((EVENT_ESCROW_REFUNDED, caller), (escrow_id, refund_amount));
         Ok(refund_amount)
@@ -527,14 +589,21 @@ impl TimeLockedEscrowContract {
         }
 
         let mut escrow = get_escrow_mut(&env, escrow_id)?;
-        if matches!(escrow.status, EscrowStatus::Released | EscrowStatus::Refunded) {
+        if matches!(
+            escrow.status,
+            EscrowStatus::Released | EscrowStatus::Refunded
+        ) {
             return Err(EscrowError::InvalidEscrowState);
         }
 
         escrow.lock_until = escrow.lock_until.saturating_add(extra_secs);
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
-        env.events()
-            .publish((EVENT_ESCROW_EXTENDED, admin), (escrow_id, escrow.lock_until));
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.events().publish(
+            (EVENT_ESCROW_EXTENDED, admin),
+            (escrow_id, escrow.lock_until),
+        );
         Ok(escrow.lock_until)
     }
 
@@ -546,7 +615,11 @@ impl TimeLockedEscrowContract {
         amount: i128,
     ) -> Result<(), EscrowError> {
         require_admin(&env, &admin)?;
-        let paused: bool = env.storage().instance().get(&DataKey::EmergencyPause).unwrap_or(false);
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::EmergencyPause)
+            .unwrap_or(false);
         if !paused {
             return Err(EscrowError::EmergencyNotEnabled);
         }
@@ -560,7 +633,9 @@ impl TimeLockedEscrowContract {
         if escrow.released_amount >= escrow.amount.saturating_sub(escrow.fee_total) {
             escrow.status = EscrowStatus::Released;
         }
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         env.events().publish(
             (EVENT_EMERGENCY_RECOVERY, admin),
             (escrow_id, recipient, amount),
@@ -570,7 +645,11 @@ impl TimeLockedEscrowContract {
 
     pub fn collect_fees(env: Env, collector: Address, amount: i128) -> Result<i128, EscrowError> {
         collector.require_auth();
-        let configured: Address = env.storage().instance().get(&DataKey::FeeCollector).unwrap();
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeCollector)
+            .unwrap();
         if collector != configured {
             return Err(EscrowError::NotAuthorized);
         }
@@ -578,13 +657,19 @@ impl TimeLockedEscrowContract {
             return Err(EscrowError::InvalidAmount);
         }
 
-        let accrued: i128 = env.storage().instance().get(&DataKey::AccruedFees).unwrap_or(0);
+        let accrued: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccruedFees)
+            .unwrap_or(0);
         if amount > accrued {
             return Err(EscrowError::InvalidAmount);
         }
 
         let remaining = accrued - amount;
-        env.storage().instance().set(&DataKey::AccruedFees, &remaining);
+        env.storage()
+            .instance()
+            .set(&DataKey::AccruedFees, &remaining);
         env.events()
             .publish((EVENT_FEES_COLLECTED, collector), (amount, remaining));
         Ok(amount)
@@ -603,12 +688,19 @@ impl TimeLockedEscrowContract {
     }
 
     pub fn get_accrued_fees(env: Env) -> i128 {
-        env.storage().instance().get(&DataKey::AccruedFees).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::AccruedFees)
+            .unwrap_or(0)
     }
 }
 
 fn next_id(env: &Env) -> u64 {
-    let current: u64 = env.storage().instance().get(&DataKey::EscrowSeq).unwrap_or(0);
+    let current: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::EscrowSeq)
+        .unwrap_or(0);
     let next = current.saturating_add(1);
     env.storage().instance().set(&DataKey::EscrowSeq, &next);
     current
@@ -631,7 +723,11 @@ fn require_admin(env: &Env, admin: &Address) -> Result<(), EscrowError> {
 }
 
 fn require_not_paused(env: &Env) -> Result<(), EscrowError> {
-    let paused: bool = env.storage().instance().get(&DataKey::EmergencyPause).unwrap_or(false);
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::EmergencyPause)
+        .unwrap_or(false);
     if paused {
         return Err(EscrowError::EmergencyNotEnabled);
     }
@@ -654,4 +750,3 @@ fn contains_addr(list: &Vec<Address>, who: &Address) -> bool {
     }
     false
 }
-

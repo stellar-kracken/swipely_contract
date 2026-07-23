@@ -1,6 +1,9 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env, String,
+};
 
 // Import the contract and client
 use swipely_contracts::{AdminRole, BridgeWatchContract, BridgeWatchContractClient};

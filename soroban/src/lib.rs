@@ -14,9 +14,9 @@ pub mod acl;
 #[cfg(test)]
 pub mod analytics_aggregator;
 #[cfg(test)]
-pub mod asset_registry;
-#[cfg(test)]
 pub mod asset_deprecation;
+#[cfg(test)]
+pub mod asset_registry;
 #[cfg(test)]
 pub mod batch_query;
 #[cfg(test)]

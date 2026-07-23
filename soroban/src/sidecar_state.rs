@@ -103,10 +103,10 @@ impl SidecarStateContract {
             return Err(SidecarError::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
-        
+
         let empty: Vec<String> = Vec::new(&env);
         env.storage().instance().set(&DataKey::EntityIndex, &empty);
-        
+
         Ok(())
     }
 

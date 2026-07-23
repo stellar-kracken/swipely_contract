@@ -11,9 +11,7 @@ mod tests {
         Address, Env, String,
     };
 
-    use swipely_contracts::emergency_fund_recovery::{
-        EmergencyFundRecovery, RecoveryError,
-    };
+    use swipely_contracts::emergency_fund_recovery::{EmergencyFundRecovery, RecoveryError};
 
     // EmergencyFundRecovery's functions touch env.storage(), which soroban-sdk
     // only allows from within an active contract call frame, and each
