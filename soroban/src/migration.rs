@@ -42,6 +42,9 @@ pub enum MigrationError {
     AlreadyAtVersion,
     /// Downgrading the schema version is not permitted.
     VersionDowngradeNotAllowed,
+    /// The target skips one or more entire major versions (e.g. 1.x -> 3.x)
+    /// without passing `force`. See `VERSION_MIGRATION_POLICY.md`.
+    VersionSkipNotAllowed,
     /// The caller is not authorised to run migrations.
     UnauthorizedMigrator,
     /// Pre- or post-migration validation checks failed.
@@ -79,16 +82,22 @@ impl MigrationHelper {
             .set::<String, MigrationVersion>(&key, &version);
     }
 
-    /// Validate that migrating `from` → `to` is a forward-only upgrade.
+    /// Validate that migrating `from` → `to` is a forward-only upgrade that
+    /// doesn't skip an entire major version.
     ///
-    /// Rules:
-    /// - `to` must not equal `from` (that would be `AlreadyAtVersion`).
+    /// Rules (see `VERSION_MIGRATION_POLICY.md`):
+    /// - `to` must not equal `from` (that would be `AlreadyAtVersion`,
+    ///   regardless of `force`).
     /// - `to` must be strictly greater than `from` in semver order (major
-    ///   takes precedence, then minor, then patch).  Any lower value is
-    ///   `VersionDowngradeNotAllowed`.
+    ///   takes precedence, then minor, then patch). Any lower value is
+    ///   `VersionDowngradeNotAllowed` unless `force` is `true`.
+    /// - `to.major` must not be more than one greater than `from.major`
+    ///   (e.g. `1.x -> 3.x` skips `2.x`). A skip is `VersionSkipNotAllowed`
+    ///   unless `force` is `true`.
     pub fn validate_upgrade(
         from: &MigrationVersion,
         to: &MigrationVersion,
+        force: bool,
     ) -> Result<(), MigrationError> {
         if from == to {
             return Err(MigrationError::AlreadyAtVersion);
@@ -103,8 +112,12 @@ impl MigrationHelper {
             to.patch > from.patch
         };
 
-        if !is_forward {
+        if !is_forward && !force {
             return Err(MigrationError::VersionDowngradeNotAllowed);
+        }
+
+        if is_forward && to.major > from.major + 1 && !force {
+            return Err(MigrationError::VersionSkipNotAllowed);
         }
 
         Ok(())
@@ -152,4 +165,136 @@ impl MigrationHelper {
             (to.major, to.minor, to.patch),
         );
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{contract, contractimpl};
+
+    fn v(major: u32, minor: u32, patch: u32) -> MigrationVersion {
+        MigrationVersion {
+            major,
+            minor,
+            patch,
+        }
+    }
+
+    #[test]
+    fn test_validate_upgrade_forward_patch_is_valid() {
+        assert_eq!(
+            MigrationHelper::validate_upgrade(&v(1, 0, 0), &v(1, 0, 1), false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_validate_upgrade_same_version_rejected() {
+        assert_eq!(
+            MigrationHelper::validate_upgrade(&v(1, 0, 0), &v(1, 0, 0), false),
+            Err(MigrationError::AlreadyAtVersion)
+        );
+    }
+
+    #[test]
+    fn test_validate_upgrade_same_version_rejected_even_when_forced() {
+        assert_eq!(
+            MigrationHelper::validate_upgrade(&v(1, 0, 0), &v(1, 0, 0), true),
+            Err(MigrationError::AlreadyAtVersion)
+        );
+    }
+
+    #[test]
+    fn test_validate_upgrade_downgrade_rejected() {
+        assert_eq!(
+            MigrationHelper::validate_upgrade(&v(2, 0, 0), &v(1, 0, 0), false),
+            Err(MigrationError::VersionDowngradeNotAllowed)
+        );
+    }
+
+    #[test]
+    fn test_validate_upgrade_downgrade_allowed_when_forced() {
+        assert_eq!(
+            MigrationHelper::validate_upgrade(&v(2, 0, 0), &v(1, 0, 0), true),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_validate_upgrade_major_skip_rejected() {
+        assert_eq!(
+            MigrationHelper::validate_upgrade(&v(1, 0, 0), &v(3, 0, 0), false),
+            Err(MigrationError::VersionSkipNotAllowed)
+        );
+    }
+
+    #[test]
+    fn test_validate_upgrade_major_skip_allowed_when_forced() {
+        assert_eq!(
+            MigrationHelper::validate_upgrade(&v(1, 0, 0), &v(3, 0, 0), true),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_validate_upgrade_sequential_major_is_not_a_skip() {
+        assert_eq!(
+            MigrationHelper::validate_upgrade(&v(1, 5, 3), &v(2, 0, 0), false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_get_version_defaults_to_zero() {
+        let env = Env::default();
+        let contract_id = env.register(TestContext, ());
+        env.as_contract(&contract_id, || {
+            assert_eq!(MigrationHelper::get_version(&env), v(0, 0, 0));
+        });
+    }
+
+    #[test]
+    fn test_set_and_get_version_roundtrip() {
+        let env = Env::default();
+        let contract_id = env.register(TestContext, ());
+        env.as_contract(&contract_id, || {
+            MigrationHelper::set_version(&env, v(1, 2, 3));
+            assert_eq!(MigrationHelper::get_version(&env), v(1, 2, 3));
+        });
+    }
+
+    #[test]
+    fn test_record_and_get_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(TestContext, ());
+        let migrator = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(MigrationHelper::get_history(&env).len(), 0);
+
+            let record = MigrationRecord {
+                from_version: v(1, 0, 0),
+                to_version: v(1, 1, 0),
+                migrated_at: 1_000,
+                migrated_by: migrator,
+                success: true,
+                notes: String::from_str(&env, "valid migration"),
+            };
+            MigrationHelper::record_migration(&env, record);
+
+            let history = MigrationHelper::get_history(&env);
+            assert_eq!(history.len(), 1);
+            assert_eq!(history.get(0).unwrap().to_version, v(1, 1, 0));
+        });
+    }
+
+    // `MigrationHelper`'s functions touch `env.storage()`, which soroban-sdk
+    // only allows from within an active contract call frame; this dummy
+    // contract exists purely to give tests that frame via `env.as_contract()`.
+    #[contract]
+    struct TestContext;
+
+    #[contractimpl]
+    impl TestContext {}
 }

@@ -6,7 +6,14 @@ The **Version Migration Helper** is a comprehensive system for managing safe con
 
 - **Version Tracking**: Semantic versioning support (MAJOR.MINOR.PATCH)
 - **Migration Validation**: Pre and post-migration state verification
+- **Dry-Run Simulation**: Preview a migration's outcome — authorization,
+  mutual exclusion, version policy, and storage-layout checks — without
+  writing anything to storage
+- **Downgrade/Skip Guard**: Downgrades and multi-major-version skips are
+  rejected unless explicitly forced
 - **Rollback Support**: Snapshot-based state rollback capability
+- **Stuck-Migration Recovery**: Cancel a migration that was begun but never
+  completed, clearing the mutual-exclusion flag
 - **Audit Trail**: Complete migration history with timestamps and actor tracking
 - **Authorization Control**: Role-based migration authorization
 - **State Verification**: Integrity checks before and after migration
@@ -24,10 +31,22 @@ Version Format: MAJOR.MINOR.PATCH
 
 ### 2. Migration Rules
 
-- **Forward-only upgrades**: No downgrading to previous versions
+- **Forward-only upgrades**: No downgrading to previous versions, enforced by
+  `validate_upgrade` and checked again by `begin_migration`
+- **No version skipping**: Jumping more than one MAJOR version in a single
+  migration (e.g. `1.x -> 3.x`) is rejected; migrate through each MAJOR
+  version in sequence
+- **Force override**: Both of the above are policy defaults, not hard limits
+  — pass `force = true` to `validate_upgrade` / `begin_migration` /
+  `complete_migration` to explicitly override a downgrade or version skip
+  when that's genuinely intended (e.g. a manual state correction)
 - **Single migration at a time**: Mutual exclusion prevents concurrent migrations
 - **Authorization required**: Only designated migrators can execute migrations
 - **Validation required**: Pre and post-migration validation checkpoints
+- **Dry-run first**: `dry_run_migration` simulates a `begin_migration` call —
+  same authorization, mutual-exclusion, and version-policy checks, plus any
+  caller-supplied storage-layout checks — and reports every problem found,
+  without writing anything to storage
 
 ### 3. State Snapshots
 
@@ -45,6 +64,14 @@ Rollback Process:
 3. Restore contract state to snapshot version
 4. Emit rollback event for off-chain monitoring
 ```
+
+### 5. Stuck-Migration Recovery
+
+If `begin_migration` succeeds but the migration never reaches
+`complete_migration` (the off-chain migration logic failed or crashed
+partway through), the contract is left with its mutual-exclusion flag set
+and no version change. `cancel_migration` clears that flag — see
+[Recovering From a Partial Migration](#recovering-from-a-partial-migration).
 
 ## API Reference
 
@@ -74,10 +101,35 @@ Retrieve the current contract version.
 pub fn validate_upgrade(
     from: &MigrationVersion,
     to: &MigrationVersion,
+    force: bool,
 ) -> Result<(), MigrationError>
 ```
 
-Validate that an upgrade from one version to another is allowed.
+Validate that an upgrade from one version to another is allowed: `to` must
+be strictly forward of `from` and must not skip an entire MAJOR version.
+Pass `force = true` to bypass both checks (an equal `from`/`to` is always
+rejected, `force` or not).
+
+### Dry-Run a Migration
+
+```rust
+pub fn dry_run_migration(
+    env: &Env,
+    migrator: Address,
+    target_version: MigrationVersion,
+    storage_errors: Vec<SorobanString>,
+    storage_warnings: Vec<SorobanString>,
+    force: bool,
+) -> DryRunReport
+```
+
+Simulate calling `begin_migration` with the same arguments, without
+mutating any contract state: checks authorization, mutual exclusion, and
+the version policy, folds in caller-supplied storage-layout
+`storage_errors`/`storage_warnings` (the same shape `validate_state`
+takes), and returns a `DryRunReport { current_version, target_version,
+would_succeed, issues, warnings }` listing every problem found rather than
+stopping at the first one.
 
 ### Begin Migration
 
@@ -86,10 +138,24 @@ pub fn begin_migration(
     env: &Env,
     migrator: Address,
     target_version: MigrationVersion,
+    force: bool,
 ) -> Result<(), MigrationError>
 ```
 
-Initiate a migration with safety checks and mutual exclusion.
+Validates `target_version` via `validate_upgrade` (pass `force` to
+override a rejected downgrade or major-version skip), then sets the
+mutual-exclusion flag.
+
+### Cancel a Stuck Migration
+
+```rust
+pub fn cancel_migration(env: &Env, migrator: Address) -> Result<(), MigrationError>
+```
+
+Clears the mutual-exclusion flag left by a `begin_migration` that never
+reached `complete_migration`. Callable by any authorized migrator; fails
+with `NoMigrationInProgress` if there's nothing to cancel. See
+[Recovering From a Partial Migration](#recovering-from-a-partial-migration).
 
 ### Complete Migration
 
@@ -100,10 +166,13 @@ pub fn complete_migration(
     to_version: MigrationVersion,
     migrator: Address,
     notes: SorobanString,
+    force: bool,
 ) -> Result<(), MigrationError>
 ```
 
-Record migration completion and update contract version.
+Record migration completion and update contract version. Pass the same
+`force` value used at `begin_migration` so a legitimately-forced
+downgrade/skip isn't rejected again here.
 
 ### Create State Snapshot
 
@@ -259,6 +328,9 @@ pub enum MigrationError {
     // Attempted to downgrade to older version
     VersionDowngradeNotAllowed,
     
+    // Target skips one or more entire major versions (e.g. 1.x -> 3.x)
+    VersionSkipNotAllowed,
+    
     // Caller is not authorized to migrate
     UnauthorizedMigrator,
     
@@ -279,6 +351,9 @@ pub enum MigrationError {
     
     // Another migration is already in progress
     MigrationInProgress,
+    
+    // cancel_migration was called but no migration is in progress
+    NoMigrationInProgress,
     
     // State integrity check failed
     StateIntegrityCheckFailed,
@@ -301,6 +376,9 @@ Event: migration_rollback
 Event: migration_initiated
 ├─ target_version: String
 └─ timestamp: u64
+
+Event: migration_cancelled
+└─ migrator: Address
 ```
 
 ## Best Practices
@@ -353,11 +431,23 @@ let snapshot = EnhancedMigrationHelper::create_state_snapshot(
     state_data
 )?;
 
+// Preview the migration first — no storage is written by this call
+let report = EnhancedMigrationHelper::dry_run_migration(
+    &env,
+    admin_address,
+    MigrationVersion { major: 1, minor: 1, patch: 0 },
+    Vec::new(&env), // storage_errors: results of caller-side layout checks
+    Vec::new(&env), // storage_warnings
+    false,          // force
+);
+assert!(report.would_succeed);
+
 // Begin migration
 EnhancedMigrationHelper::begin_migration(
     &env,
     admin_address,
-    MigrationVersion { major: 1, minor: 1, patch: 0 }
+    MigrationVersion { major: 1, minor: 1, patch: 0 },
+    false, // force
 )?;
 
 // Pre-migration validation
@@ -385,8 +475,13 @@ EnhancedMigrationHelper::complete_migration(
     MigrationVersion { major: 1, minor: 0, patch: 0 },
     MigrationVersion { major: 1, minor: 1, patch: 0 },
     admin_address,
-    SorobanString::from_str(&env, "Migration completed successfully")
+    SorobanString::from_str(&env, "Migration completed successfully"),
+    false, // force
 )?;
+
+// If step 3 or 4 above fails or crashes before complete_migration runs,
+// recover with:
+// EnhancedMigrationHelper::cancel_migration(&env, admin_address)?;
 ```
 
 ## Monitoring & Alerting
@@ -460,10 +555,30 @@ alert: "Migration taking longer than expected"
 ### Issue: Migration In Progress (Mutual Exclusion)
 
 **Solution:**
-1. Verify previous migration completed
-2. Check for hung migration processes
-3. May need to manually clear flag if system crashed
-4. Monitor migration completion carefully
+1. Verify the previous migration actually completed (check `get_history`)
+2. If it didn't — the off-chain migration logic failed or crashed between
+   `begin_migration` and `complete_migration` — call `cancel_migration` (any
+   authorized migrator) to clear the stuck flag
+3. If the partial migration already mutated other contract state beyond the
+   version, restore it from the pre-migration snapshot via
+   `rollback_to_snapshot` before retrying
+4. Monitor migration completion carefully; watch for the `migration_cancelled`
+   event as a signal that a migration didn't complete cleanly
+
+### Recovering From a Partial Migration
+
+The full recovery procedure for a migration that fails partway through:
+
+1. **Detect**: `begin_migration` on the next attempt returns
+   `MigrationInProgress` instead of succeeding
+2. **Cancel**: call `cancel_migration(env, migrator)` as any authorized
+   migrator to clear the mutual-exclusion flag (fails with
+   `NoMigrationInProgress` if nothing was actually stuck)
+3. **Restore state, if needed**: if the failed migration changed contract
+   state beyond the version number, call `rollback_to_snapshot` with the
+   pre-migration snapshot's hash to restore it
+4. **Investigate**: review `get_history` and the `migration_cancelled` event
+   before retrying `begin_migration`
 
 ## Version Policy
 
@@ -477,7 +592,10 @@ alert: "Migration taking longer than expected"
 
 - **Within same MAJOR**: Use automatic migration
 - **Across MAJOR versions**: Plan careful multi-step migrations
-- **Skip versions**: Not recommended; migrate sequentially
+- **Skip versions**: Enforced in code, not just convention — `validate_upgrade`
+  rejects a target more than one MAJOR version ahead (`VersionSkipNotAllowed`);
+  migrate through each MAJOR version in sequence, or pass `force = true` if
+  skipping is genuinely intended
 
 ### Deprecation
 

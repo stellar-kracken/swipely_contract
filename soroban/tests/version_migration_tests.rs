@@ -14,6 +14,14 @@ mod tests {
         EnhancedMigrationHelper, MigrationError, MigrationVersion, ValidationCheckpoint,
     };
 
+    fn v(major: u32, minor: u32, patch: u32) -> MigrationVersion {
+        MigrationVersion {
+            major,
+            minor,
+            patch,
+        }
+    }
+
     // EnhancedMigrationHelper's functions touch env.storage(), which
     // soroban-sdk only allows from within an active contract call frame, and
     // each require_auth() call consumes that frame's single-use
@@ -74,7 +82,7 @@ mod tests {
             patch: 0,
         };
 
-        let result = EnhancedMigrationHelper::validate_upgrade(&from, &to);
+        let result = EnhancedMigrationHelper::validate_upgrade(&from, &to, false);
 
         assert!(result.is_ok(), "Forward upgrade should be valid");
     }
@@ -87,7 +95,7 @@ mod tests {
             patch: 0,
         };
 
-        let result = EnhancedMigrationHelper::validate_upgrade(&version, &version);
+        let result = EnhancedMigrationHelper::validate_upgrade(&version, &version, false);
 
         assert_eq!(
             result,
@@ -109,7 +117,7 @@ mod tests {
             patch: 0,
         };
 
-        let result = EnhancedMigrationHelper::validate_upgrade(&from, &to);
+        let result = EnhancedMigrationHelper::validate_upgrade(&from, &to, false);
 
         assert_eq!(
             result,
@@ -160,7 +168,7 @@ mod tests {
         };
 
         let result = env.as_contract(&contract_id, || {
-            EnhancedMigrationHelper::begin_migration(&env, admin, target_version)
+            EnhancedMigrationHelper::begin_migration(&env, admin, target_version, false)
         });
 
         assert!(result.is_ok(), "Begin migration should succeed");
@@ -189,7 +197,7 @@ mod tests {
         };
 
         let result = env.as_contract(&contract_id, || {
-            EnhancedMigrationHelper::begin_migration(&env, unauthorized, target_version)
+            EnhancedMigrationHelper::begin_migration(&env, unauthorized, target_version, false)
         });
 
         assert_eq!(
@@ -221,7 +229,12 @@ mod tests {
         };
 
         env.as_contract(&contract_id, || {
-            EnhancedMigrationHelper::begin_migration(&env, admin.clone(), target_version.clone())
+            EnhancedMigrationHelper::begin_migration(
+                &env,
+                admin.clone(),
+                target_version.clone(),
+                false,
+            )
         })
         .expect("Begin migration should succeed");
 
@@ -233,6 +246,7 @@ mod tests {
                 target_version,
                 admin,
                 notes,
+                false,
             )
         });
 
@@ -382,7 +396,7 @@ mod tests {
             patch: 0,
         };
 
-        let result = EnhancedMigrationHelper::validate_upgrade(&v1, &v2);
+        let result = EnhancedMigrationHelper::validate_upgrade(&v1, &v2, false);
         assert!(result.is_ok(), "Major version upgrade should be valid");
     }
 
@@ -399,7 +413,7 @@ mod tests {
             patch: 0,
         };
 
-        let result = EnhancedMigrationHelper::validate_upgrade(&v1, &v2);
+        let result = EnhancedMigrationHelper::validate_upgrade(&v1, &v2, false);
         assert!(result.is_ok(), "Minor version upgrade should be valid");
     }
 
@@ -416,7 +430,7 @@ mod tests {
             patch: 4,
         };
 
-        let result = EnhancedMigrationHelper::validate_upgrade(&v1, &v2);
+        let result = EnhancedMigrationHelper::validate_upgrade(&v1, &v2, false);
         assert!(result.is_ok(), "Patch version upgrade should be valid");
     }
 
@@ -454,7 +468,7 @@ mod tests {
             patch: 0,
         };
         let begin_result = env.as_contract(&contract_id, || {
-            EnhancedMigrationHelper::begin_migration(&env, admin.clone(), v2.clone())
+            EnhancedMigrationHelper::begin_migration(&env, admin.clone(), v2.clone(), false)
         });
         assert!(begin_result.is_ok());
 
@@ -479,6 +493,7 @@ mod tests {
                 v2,
                 admin,
                 SorobanString::from_str(&env, "Successful migration"),
+                false,
             )
         });
         assert!(complete_result.is_ok());
@@ -489,5 +504,263 @@ mod tests {
         assert_eq!(final_version.major, 1);
         assert_eq!(final_version.minor, 1);
         assert_eq!(final_version.patch, 0);
+    }
+
+    #[test]
+    fn test_validate_upgrade_major_skip_rejected() {
+        let result = EnhancedMigrationHelper::validate_upgrade(&v(1, 0, 0), &v(3, 0, 0), false);
+        assert_eq!(
+            result,
+            Err(MigrationError::VersionSkipNotAllowed),
+            "Skipping an entire major version should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_upgrade_major_skip_allowed_when_forced() {
+        let result = EnhancedMigrationHelper::validate_upgrade(&v(1, 0, 0), &v(3, 0, 0), true);
+        assert!(result.is_ok(), "A forced major-version skip should succeed");
+    }
+
+    #[test]
+    fn test_validate_upgrade_downgrade_allowed_when_forced() {
+        let result = EnhancedMigrationHelper::validate_upgrade(&v(2, 0, 0), &v(1, 0, 0), true);
+        assert!(result.is_ok(), "A forced downgrade should succeed");
+    }
+
+    #[test]
+    fn test_begin_migration_rejects_version_skip_unless_forced() {
+        let (env, admin, contract_id) = setup_env();
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::initialize(&env, admin.clone(), v(1, 0, 0))
+        })
+        .expect("Initialize should succeed");
+
+        let unforced = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::begin_migration(&env, admin.clone(), v(3, 0, 0), false)
+        });
+        assert_eq!(
+            unforced,
+            Err(MigrationError::VersionSkipNotAllowed),
+            "begin_migration should reject a major-version skip by default"
+        );
+
+        let forced = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::begin_migration(&env, admin, v(3, 0, 0), true)
+        });
+        assert!(
+            forced.is_ok(),
+            "begin_migration should allow a forced major-version skip"
+        );
+    }
+
+    #[test]
+    fn test_begin_migration_rejects_downgrade_unless_forced() {
+        let (env, admin, contract_id) = setup_env();
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::initialize(&env, admin.clone(), v(2, 0, 0))
+        })
+        .expect("Initialize should succeed");
+
+        let unforced = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::begin_migration(&env, admin.clone(), v(1, 0, 0), false)
+        });
+        assert_eq!(
+            unforced,
+            Err(MigrationError::VersionDowngradeNotAllowed),
+            "begin_migration should reject a downgrade by default"
+        );
+
+        let forced = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::begin_migration(&env, admin, v(1, 0, 0), true)
+        });
+        assert!(
+            forced.is_ok(),
+            "begin_migration should allow a forced downgrade"
+        );
+    }
+
+    #[test]
+    fn test_dry_run_migration_valid_target_does_not_mutate_state() {
+        let (env, admin, contract_id) = setup_env();
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::initialize(&env, admin.clone(), v(1, 0, 0))
+        })
+        .expect("Initialize should succeed");
+
+        let report = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::dry_run_migration(
+                &env,
+                admin,
+                v(1, 1, 0),
+                Vec::new(&env),
+                Vec::new(&env),
+                false,
+            )
+        });
+
+        assert!(report.would_succeed, "a valid target should dry-run clean");
+        assert_eq!(report.issues.len(), 0);
+        assert_eq!(report.current_version, v(1, 0, 0));
+        assert_eq!(report.target_version, v(1, 1, 0));
+
+        // A dry run must not mutate any state: version, history, and the
+        // in-progress flag should all be untouched.
+        let version_after =
+            env.as_contract(&contract_id, || EnhancedMigrationHelper::get_version(&env));
+        assert_eq!(version_after, v(1, 0, 0));
+
+        let history_after =
+            env.as_contract(&contract_id, || EnhancedMigrationHelper::get_history(&env));
+        assert_eq!(history_after.len(), 0);
+
+        // begin_migration must still be able to proceed afterwards, proving
+        // the dry run didn't set the mutual-exclusion flag.
+        let begin_result = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::begin_migration(
+                &env,
+                Address::generate(&env),
+                v(1, 1, 0),
+                false,
+            )
+        });
+        // The fresh address isn't an authorized migrator, but the error
+        // proves the call reached the authorization check rather than
+        // failing on a stale "migration in progress" flag left by dry_run.
+        assert_eq!(begin_result, Err(MigrationError::UnauthorizedMigrator));
+    }
+
+    #[test]
+    fn test_dry_run_migration_reports_rejected_target_without_force() {
+        let (env, admin, contract_id) = setup_env();
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::initialize(&env, admin.clone(), v(1, 0, 0))
+        })
+        .expect("Initialize should succeed");
+
+        let report = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::dry_run_migration(
+                &env,
+                admin,
+                v(3, 0, 0),
+                Vec::new(&env),
+                Vec::new(&env),
+                false,
+            )
+        });
+
+        assert!(
+            !report.would_succeed,
+            "a version-skipping target should be reported as failing"
+        );
+        assert_eq!(report.issues.len(), 1);
+    }
+
+    #[test]
+    fn test_dry_run_migration_reports_storage_errors_and_unauthorized_caller() {
+        let (env, admin, contract_id) = setup_env();
+        let stranger = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::initialize(&env, admin, v(1, 0, 0))
+        })
+        .expect("Initialize should succeed");
+
+        let mut storage_errors = Vec::new(&env);
+        storage_errors.push_back(SorobanString::from_str(&env, "missing storage key: foo"));
+
+        let report = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::dry_run_migration(
+                &env,
+                stranger,
+                v(1, 1, 0),
+                storage_errors,
+                Vec::new(&env),
+                false,
+            )
+        });
+
+        assert!(!report.would_succeed);
+        // One issue for the unauthorized caller, one for the storage check.
+        assert_eq!(report.issues.len(), 2);
+    }
+
+    #[test]
+    fn test_cancel_migration_clears_stuck_in_progress_flag() {
+        let (env, admin, contract_id) = setup_env();
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::initialize(&env, admin.clone(), v(1, 0, 0))
+        })
+        .expect("Initialize should succeed");
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::begin_migration(&env, admin.clone(), v(1, 1, 0), false)
+        })
+        .expect("Begin migration should succeed");
+
+        // Simulate the off-chain migration failing before complete_migration
+        // is ever called: begin_migration again should now be blocked.
+        let blocked = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::begin_migration(&env, admin.clone(), v(1, 1, 0), false)
+        });
+        assert_eq!(blocked, Err(MigrationError::MigrationInProgress));
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::cancel_migration(&env, admin.clone())
+        })
+        .expect("Cancelling a stuck migration should succeed");
+
+        // A fresh begin_migration should now proceed, and the version is
+        // unchanged since the migration never completed.
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::begin_migration(&env, admin, v(1, 1, 0), false)
+        })
+        .expect("begin_migration should succeed again after cancel_migration");
+
+        let version = env.as_contract(&contract_id, || EnhancedMigrationHelper::get_version(&env));
+        assert_eq!(version, v(1, 0, 0));
+    }
+
+    #[test]
+    fn test_cancel_migration_fails_when_nothing_in_progress() {
+        let (env, admin, contract_id) = setup_env();
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::initialize(&env, admin.clone(), v(1, 0, 0))
+        })
+        .expect("Initialize should succeed");
+
+        let result = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::cancel_migration(&env, admin)
+        });
+
+        assert_eq!(result, Err(MigrationError::NoMigrationInProgress));
+    }
+
+    #[test]
+    fn test_cancel_migration_unauthorized() {
+        let (env, admin, contract_id) = setup_env();
+        let stranger = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::initialize(&env, admin.clone(), v(1, 0, 0))
+        })
+        .expect("Initialize should succeed");
+
+        env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::begin_migration(&env, admin, v(1, 1, 0), false)
+        })
+        .expect("Begin migration should succeed");
+
+        let result = env.as_contract(&contract_id, || {
+            EnhancedMigrationHelper::cancel_migration(&env, stranger)
+        });
+
+        assert_eq!(result, Err(MigrationError::UnauthorizedMigrator));
     }
 }
