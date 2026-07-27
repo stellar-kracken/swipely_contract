@@ -66,3 +66,35 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  fuzz:
+    name: Fuzz targets (bounded)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-fuzz-
+
+      # Bounded iteration count keeps this fast on every PR; run with a much
+      # higher FUZZ_ITERATIONS locally for a longer campaign (see each fuzz
+      # test file's header for the exact command).
+      - name: Run fuzz targets (capped iterations)
+        env:
+          FUZZ_ITERATIONS: "200"
+        run: |
+          cargo test --test relay_contract_fuzz -p swipely-contracts
+          cargo test --test threshold_window_fuzz -p swipely-contracts
+          cargo test --test escrow_contract_fuzz -p escrow-contract
