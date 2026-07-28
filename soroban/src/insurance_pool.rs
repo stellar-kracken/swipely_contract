@@ -3,6 +3,10 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Ve
 const BPS_DENOM: i128 = 10_000;
 const REWARD_SCALE: i128 = 1_000_000_000;
 const DEFAULT_WITHDRAW_DELAY_SECS: u64 = 86_400;
+/// Default per-claim cap, as bps of the pool's total liquidity (20%).
+const DEFAULT_MAX_CLAIM_BPS: u32 = 2_000;
+/// Default cooldown between claims from the same claimant on a pool (1 day).
+const DEFAULT_CLAIM_COOLDOWN_SECS: u64 = 86_400;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,6 +50,12 @@ pub struct PoolInfo {
     pub payout_total: i128,
     pub paid_claims: u32,
     pub rejected_claims: u32,
+    /// Absolute per-claim payout cap; 0 disables the absolute cap.
+    pub max_claim_amount: i128,
+    /// Per-claim payout cap as bps of `total_liquidity`; 0 disables the cap.
+    pub max_claim_bps: u32,
+    /// Minimum seconds between claims submitted by the same claimant; 0 disables it.
+    pub claim_cooldown_secs: u64,
 }
 
 #[contracttype]
@@ -97,6 +107,7 @@ pub enum DataKey {
     WithdrawalRequest(u64),
     ClaimCount,
     WithdrawalCount,
+    ClaimCooldown(Address, String),
 }
 
 #[contract]
@@ -202,6 +213,9 @@ impl InsurancePoolContract {
                 payout_total: 0,
                 paid_claims: 0,
                 rejected_claims: 0,
+                max_claim_amount: 0,
+                max_claim_bps: DEFAULT_MAX_CLAIM_BPS,
+                claim_cooldown_secs: DEFAULT_CLAIM_COOLDOWN_SECS,
             }
         };
 
@@ -219,6 +233,36 @@ impl InsurancePoolContract {
 
         let mut pool = load_pool(&env, &pool_id);
         pool.risk_score_bps = risk_score_bps;
+        env.storage()
+            .instance()
+            .set(&DataKey::CoveragePool(pool_id), &pool);
+    }
+
+    /// Configures per-claim payout caps and the per-claimant cooldown for a pool.
+    ///
+    /// `max_claim_amount` is an absolute cap (0 disables it); `max_claim_bps` caps a
+    /// claim to a percentage of `total_liquidity` (0 disables it). Both may be set
+    /// together, in which case a claim must satisfy whichever is active.
+    pub fn configure_claim_limits(
+        env: Env,
+        admin: Address,
+        pool_id: String,
+        max_claim_amount: i128,
+        max_claim_bps: u32,
+        claim_cooldown_secs: u64,
+    ) {
+        require_admin(&env, &admin);
+        if max_claim_amount < 0 {
+            panic!("max claim amount cannot be negative");
+        }
+        if max_claim_bps > 10_000 {
+            panic!("invalid max claim bps");
+        }
+
+        let mut pool = load_pool(&env, &pool_id);
+        pool.max_claim_amount = max_claim_amount;
+        pool.max_claim_bps = max_claim_bps;
+        pool.claim_cooldown_secs = claim_cooldown_secs;
         env.storage()
             .instance()
             .set(&DataKey::CoveragePool(pool_id), &pool);
@@ -419,6 +463,9 @@ impl InsurancePoolContract {
         if pool.active_coverage < amount {
             panic!("claim exceeds active coverage");
         }
+        enforce_claim_caps(&pool, amount);
+        require_claim_cooldown_elapsed(&env, &claimant, &pool_id, pool.claim_cooldown_secs);
+        record_claim_time(&env, &claimant, &pool_id);
 
         let claim_id = next_claim_id(&env);
         let claim = ClaimInfo {
@@ -744,6 +791,51 @@ fn checked_sub(a: i128, b: i128, msg: &str) -> i128 {
     a.checked_sub(b).unwrap_or_else(|| panic!("{}", msg))
 }
 
+/// Enforces the pool's absolute and percentage-of-pool per-claim caps, if configured.
+fn enforce_claim_caps(pool: &PoolInfo, amount: i128) {
+    if pool.max_claim_amount > 0 && amount > pool.max_claim_amount {
+        panic!("claim exceeds maximum claim amount");
+    }
+
+    if pool.max_claim_bps > 0 {
+        let max_by_pct = pool
+            .total_liquidity
+            .checked_mul(pool.max_claim_bps as i128)
+            .and_then(|v| v.checked_div(BPS_DENOM))
+            .unwrap_or_else(|| panic!("claim cap overflow"));
+        if amount > max_by_pct {
+            panic!("claim exceeds maximum claim percentage of pool");
+        }
+    }
+}
+
+/// Panics if `claimant` is still within the pool's claim cooldown window.
+fn require_claim_cooldown_elapsed(
+    env: &Env,
+    claimant: &Address,
+    pool_id: &String,
+    cooldown_secs: u64,
+) {
+    if cooldown_secs == 0 {
+        return;
+    }
+
+    let key = DataKey::ClaimCooldown(claimant.clone(), pool_id.clone());
+    let last_claim_time: u64 = env.storage().instance().get(&key).unwrap_or(0);
+    let cooldown_until = last_claim_time.saturating_add(cooldown_secs);
+    if cooldown_until > env.ledger().timestamp() {
+        panic!("claim cooldown active");
+    }
+}
+
+/// Records the current ledger time as `claimant`'s last claim submission for `pool_id`.
+fn record_claim_time(env: &Env, claimant: &Address, pool_id: &String) {
+    let key = DataKey::ClaimCooldown(claimant.clone(), pool_id.clone());
+    env.storage()
+        .instance()
+        .set(&key, &env.ledger().timestamp());
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -940,7 +1032,9 @@ mod test {
         let (env, client, admin, _a1, _a2, staker, pool_id) = setup();
         let buyer = staker.clone();
 
-        client.stake_liquidity(&staker, &pool_id, &8_000);
+        // Staked above 10_000 so the claim below sits within the default 20%
+        // per-claim cap (2_000) introduced alongside per-claim caps/cooldowns.
+        client.stake_liquidity(&staker, &pool_id, &10_000);
         let quoted = client.quote_premium(&pool_id, &3_000, &CoverageTier::Balanced);
         client.purchase_coverage(&buyer, &pool_id, &3_000, &CoverageTier::Balanced, &quoted);
 
@@ -962,5 +1056,170 @@ mod test {
 
         let pool = client.get_pool(&pool_id).unwrap();
         assert_eq!(pool.rejected_claims, 1);
+    }
+
+    #[test]
+    fn test_claim_at_exact_percentage_cap_succeeds() {
+        let (env, client, _admin, _a1, _a2, staker, pool_id) = setup();
+        let buyer = Address::generate(&env);
+
+        // Default cap is 20% of total_liquidity; 20% of 10_000 is exactly 2_000.
+        client.stake_liquidity(&staker, &pool_id, &10_000);
+        let quoted = client.quote_premium(&pool_id, &5_000, &CoverageTier::Balanced);
+        client.purchase_coverage(&buyer, &pool_id, &5_000, &CoverageTier::Balanced, &quoted);
+
+        let claim_id = client.submit_claim(
+            &buyer,
+            &pool_id,
+            &2_000,
+            &String::from_str(&env, "QmExactCap"),
+        );
+        let claim = client.get_claim(&claim_id).unwrap();
+        assert_eq!(claim.amount, 2_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "claim exceeds maximum claim percentage of pool")]
+    fn test_claim_exceeds_percentage_cap_panics() {
+        let (env, client, _admin, _a1, _a2, staker, pool_id) = setup();
+        let buyer = Address::generate(&env);
+
+        client.stake_liquidity(&staker, &pool_id, &10_000);
+        let quoted = client.quote_premium(&pool_id, &5_000, &CoverageTier::Balanced);
+        client.purchase_coverage(&buyer, &pool_id, &5_000, &CoverageTier::Balanced, &quoted);
+
+        // 20% of 10_000 is 2_000; one unit over that must panic.
+        client.submit_claim(
+            &buyer,
+            &pool_id,
+            &2_001,
+            &String::from_str(&env, "QmOverPercentCap"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "claim exceeds maximum claim amount")]
+    fn test_claim_exceeds_absolute_cap_panics() {
+        let (env, client, admin, _a1, _a2, staker, pool_id) = setup();
+        let buyer = Address::generate(&env);
+
+        client.stake_liquidity(&staker, &pool_id, &50_000);
+        let quoted = client.quote_premium(&pool_id, &10_000, &CoverageTier::Balanced);
+        client.purchase_coverage(&buyer, &pool_id, &10_000, &CoverageTier::Balanced, &quoted);
+
+        // Tighten the absolute cap below the (otherwise satisfied) percentage cap.
+        client.configure_claim_limits(&admin, &pool_id, &1_000i128, &2_000u32, &86_400u64);
+
+        client.submit_claim(
+            &buyer,
+            &pool_id,
+            &1_500,
+            &String::from_str(&env, "QmOverAbsoluteCap"),
+        );
+    }
+
+    #[test]
+    fn test_admin_can_widen_claim_limits() {
+        let (env, client, admin, _a1, _a2, staker, pool_id) = setup();
+        let buyer = Address::generate(&env);
+
+        client.stake_liquidity(&staker, &pool_id, &10_000);
+        let quoted = client.quote_premium(&pool_id, &6_000, &CoverageTier::Balanced);
+        client.purchase_coverage(&buyer, &pool_id, &6_000, &CoverageTier::Balanced, &quoted);
+
+        // Default 20% cap (2_000) would reject a 5_000 claim; widen it via governance.
+        client.configure_claim_limits(&admin, &pool_id, &0i128, &10_000u32, &86_400u64);
+
+        let pool = client.get_pool(&pool_id).unwrap();
+        assert_eq!(pool.max_claim_bps, 10_000);
+
+        let claim_id = client.submit_claim(
+            &buyer,
+            &pool_id,
+            &5_000,
+            &String::from_str(&env, "QmWidenedCap"),
+        );
+        let claim = client.get_claim(&claim_id).unwrap();
+        assert_eq!(claim.amount, 5_000);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_non_admin_cannot_configure_claim_limits() {
+        let (env, client, _admin, _a1, _a2, _staker, pool_id) = setup();
+        let rogue = Address::generate(&env);
+        client.configure_claim_limits(&rogue, &pool_id, &0i128, &1_000u32, &3_600u64);
+    }
+
+    #[test]
+    #[should_panic(expected = "claim cooldown active")]
+    fn test_claim_cooldown_blocks_repeat_claim() {
+        let (env, client, _admin, _a1, _a2, staker, pool_id) = setup();
+        let buyer = Address::generate(&env);
+
+        client.stake_liquidity(&staker, &pool_id, &20_000);
+        let quoted = client.quote_premium(&pool_id, &6_000, &CoverageTier::Balanced);
+        client.purchase_coverage(&buyer, &pool_id, &6_000, &CoverageTier::Balanced, &quoted);
+
+        client.submit_claim(&buyer, &pool_id, &1_000, &String::from_str(&env, "QmFirst"));
+        // Immediate second claim from the same claimant must hit the cooldown.
+        client.submit_claim(
+            &buyer,
+            &pool_id,
+            &1_000,
+            &String::from_str(&env, "QmSecond"),
+        );
+    }
+
+    #[test]
+    fn test_claim_cooldown_elapses_and_allows_next_claim() {
+        let (env, client, _admin, _a1, _a2, staker, pool_id) = setup();
+        let buyer = Address::generate(&env);
+
+        client.stake_liquidity(&staker, &pool_id, &20_000);
+        let quoted = client.quote_premium(&pool_id, &6_000, &CoverageTier::Balanced);
+        client.purchase_coverage(&buyer, &pool_id, &6_000, &CoverageTier::Balanced, &quoted);
+
+        client.submit_claim(&buyer, &pool_id, &1_000, &String::from_str(&env, "QmFirst"));
+
+        // Default cooldown is 1 day; advance exactly to the boundary.
+        env.ledger().with_mut(|li| li.timestamp += 86_400);
+
+        let claim_id = client.submit_claim(
+            &buyer,
+            &pool_id,
+            &1_000,
+            &String::from_str(&env, "QmSecond"),
+        );
+        let claim = client.get_claim(&claim_id).unwrap();
+        assert_eq!(claim.amount, 1_000);
+    }
+
+    #[test]
+    fn test_claim_cooldown_is_per_claimant_not_global() {
+        let (env, client, _admin, _a1, _a2, staker, pool_id) = setup();
+        let buyer_1 = Address::generate(&env);
+        let buyer_2 = Address::generate(&env);
+
+        client.stake_liquidity(&staker, &pool_id, &20_000);
+        let quoted = client.quote_premium(&pool_id, &4_000, &CoverageTier::Balanced);
+        client.purchase_coverage(&buyer_1, &pool_id, &4_000, &CoverageTier::Balanced, &quoted);
+        client.purchase_coverage(&buyer_2, &pool_id, &4_000, &CoverageTier::Balanced, &quoted);
+
+        client.submit_claim(
+            &buyer_1,
+            &pool_id,
+            &1_000,
+            &String::from_str(&env, "QmBuyer1"),
+        );
+        // A different claimant is unaffected by buyer_1's cooldown.
+        let claim_id = client.submit_claim(
+            &buyer_2,
+            &pool_id,
+            &1_000,
+            &String::from_str(&env, "QmBuyer2"),
+        );
+        let claim = client.get_claim(&claim_id).unwrap();
+        assert_eq!(claim.amount, 1_000);
     }
 }
