@@ -41,6 +41,56 @@ pub enum GovernanceEventType {
     TimelockDelayChanged,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigUpdatedEvent {
+    pub version: u32,
+    pub event_type: GovernanceEventType,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParameterChangedEvent {
+    pub version: u32,
+    pub event_type: GovernanceEventType,
+    pub new_value: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalExecutedEvent {
+    pub version: u32,
+    pub proposal_id: u32,
+    pub is_emergency: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalCreatedEvent {
+    pub version: u32,
+    pub proposal_id: u32,
+    pub proposer: Address,
+    pub proposal_type: ProposalType,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalStatusChangedEvent {
+    pub version: u32,
+    pub proposal_id: u32,
+    pub new_status: ProposalStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoteCastEvent {
+    pub version: u32,
+    pub proposal_id: u32,
+    pub voter: Address,
+    pub choice: VoteChoice,
+    pub effective_votes: i128,
+}
+
 // ── Structs ───────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -163,8 +213,16 @@ impl GovernanceContract {
         env.storage().instance().set(&DataKey::Config, &cfg);
 
         env.events().publish(
-            (symbol_short!("gov"), symbol_short!("init")),
-            GovernanceEventType::ConfigUpdated,
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Governance"),
+                soroban_sdk::Symbol::new(&env, "ConfigUpdated"),
+                soroban_sdk::symbol_short!("sys"),
+            ),
+            ConfigUpdatedEvent {
+                version: 1,
+                event_type: GovernanceEventType::ConfigUpdated,
+            },
         );
     }
 
@@ -310,8 +368,8 @@ impl GovernanceContract {
 
         let proposal = Proposal {
             id,
-            proposer,
-            proposal_type,
+            proposer: proposer.clone(),
+            proposal_type: proposal_type.clone(),
             title,
             description,
             target_contract,
@@ -332,6 +390,21 @@ impl GovernanceContract {
             .persistent()
             .set(&DataKey::Proposal(id), &proposal);
 
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Governance"),
+                soroban_sdk::Symbol::new(&env, "Created"),
+                id,
+            ),
+            ProposalCreatedEvent {
+                version: 1,
+                proposal_id: id,
+                proposer: proposer.clone(),
+                proposal_type: proposal_type.clone(),
+            },
+        );
+
         id
     }
 
@@ -347,6 +420,20 @@ impl GovernanceContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Governance"),
+                soroban_sdk::Symbol::new(&env, "StatusChanged"),
+                proposal_id,
+            ),
+            ProposalStatusChangedEvent {
+                version: 1,
+                proposal_id,
+                new_status: ProposalStatus::Active,
+            },
+        );
     }
 
     pub fn cast_vote(env: Env, voter: Address, proposal_id: u32, choice: VoteChoice) {
@@ -387,7 +474,7 @@ impl GovernanceContract {
         };
         env.storage()
             .persistent()
-            .set(&DataKey::VoteRecord(proposal_id, voter), &record);
+            .set(&DataKey::VoteRecord(proposal_id, voter.clone()), &record);
 
         match choice {
             VoteChoice::For => proposal.votes_for += effective_votes,
@@ -398,6 +485,22 @@ impl GovernanceContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Governance"),
+                soroban_sdk::Symbol::new(&env, "VoteCast"),
+                proposal_id,
+            ),
+            VoteCastEvent {
+                version: 1,
+                proposal_id,
+                voter,
+                choice,
+                effective_votes,
+            },
+        );
     }
 
     /// Tally votes and mark Passed or Failed. Anyone can call after end_time.
@@ -434,6 +537,20 @@ impl GovernanceContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Governance"),
+                soroban_sdk::Symbol::new(&env, "StatusChanged"),
+                proposal_id,
+            ),
+            ProposalStatusChangedEvent {
+                version: 1,
+                proposal_id,
+                new_status: proposal.status,
+            },
+        );
     }
 
     /// Queue a Passed proposal for timelock.
@@ -448,6 +565,20 @@ impl GovernanceContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Governance"),
+                soroban_sdk::Symbol::new(&env, "StatusChanged"),
+                proposal_id,
+            ),
+            ProposalStatusChangedEvent {
+                version: 1,
+                proposal_id,
+                new_status: ProposalStatus::Queued,
+            },
+        );
     }
 
     /// Execute a Queued proposal after the timelock expires.
@@ -468,8 +599,19 @@ impl GovernanceContract {
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
-        env.events()
-            .publish((symbol_short!("gov"), symbol_short!("exec")), proposal_id);
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Governance"),
+                soroban_sdk::Symbol::new(&env, "Executed"),
+                proposal_id,
+            ),
+            ProposalExecutedEvent {
+                version: 1,
+                proposal_id,
+                is_emergency: false,
+            },
+        );
     }
 
     // ── Guardian multisig ─────────────────────────────────────────────────────
@@ -547,8 +689,19 @@ impl GovernanceContract {
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
-        env.events()
-            .publish((symbol_short!("gov"), symbol_short!("gexec")), proposal_id);
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Governance"),
+                soroban_sdk::Symbol::new(&env, "Executed"),
+                proposal_id,
+            ),
+            ProposalExecutedEvent {
+                version: 1,
+                proposal_id,
+                is_emergency: true,
+            },
+        );
     }
 
     /// Cancel a proposal. Only the proposer or admin may cancel.
@@ -576,6 +729,20 @@ impl GovernanceContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Governance"),
+                soroban_sdk::Symbol::new(&env, "StatusChanged"),
+                proposal_id,
+            ),
+            ProposalStatusChangedEvent {
+                version: 1,
+                proposal_id,
+                new_status: ProposalStatus::Cancelled,
+            },
+        );
     }
 
     // ── Config updates ────────────────────────────────────────────────────────
@@ -631,38 +798,95 @@ impl GovernanceContract {
         env.storage().instance().set(&DataKey::Config, &cfg);
 
         env.events().publish(
-            (symbol_short!("gov"), symbol_short!("cfg_upd")),
-            GovernanceEventType::ConfigUpdated,
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Governance"),
+                soroban_sdk::Symbol::new(&env, "ConfigUpdated"),
+                soroban_sdk::symbol_short!("sys"),
+            ),
+            ConfigUpdatedEvent {
+                version: 1,
+                event_type: GovernanceEventType::ConfigUpdated,
+            },
         );
 
         if old_cfg.quorum_bps != quorum_bps {
-            env.events()
-                .publish((symbol_short!("gov"), symbol_short!("quorum")), quorum_bps);
+            env.events().publish(
+                (
+                    soroban_sdk::symbol_short!("Swipely"),
+                    soroban_sdk::Symbol::new(&env, "Governance"),
+                    soroban_sdk::Symbol::new(&env, "ParamChanged"),
+                    soroban_sdk::symbol_short!("sys"),
+                ),
+                ParameterChangedEvent {
+                    version: 1,
+                    event_type: GovernanceEventType::QuorumChanged,
+                    new_value: quorum_bps as u64,
+                },
+            );
         }
 
         if old_cfg.pass_threshold_bps != pass_threshold_bps {
             env.events().publish(
-                (symbol_short!("gov"), symbol_short!("thresh")),
-                pass_threshold_bps,
+                (
+                    soroban_sdk::symbol_short!("Swipely"),
+                    soroban_sdk::Symbol::new(&env, "Governance"),
+                    soroban_sdk::Symbol::new(&env, "ParamChanged"),
+                    soroban_sdk::symbol_short!("sys"),
+                ),
+                ParameterChangedEvent {
+                    version: 1,
+                    event_type: GovernanceEventType::ThresholdChanged,
+                    new_value: pass_threshold_bps as u64,
+                },
             );
         }
 
         if old_cfg.voting_delay != voting_delay {
-            env.events()
-                .publish((symbol_short!("gov"), symbol_short!("delay")), voting_delay);
+            env.events().publish(
+                (
+                    soroban_sdk::symbol_short!("Swipely"),
+                    soroban_sdk::Symbol::new(&env, "Governance"),
+                    soroban_sdk::Symbol::new(&env, "ParamChanged"),
+                    soroban_sdk::symbol_short!("sys"),
+                ),
+                ParameterChangedEvent {
+                    version: 1,
+                    event_type: GovernanceEventType::VotingDelayChanged,
+                    new_value: voting_delay,
+                },
+            );
         }
 
         if old_cfg.voting_period != voting_period {
             env.events().publish(
-                (symbol_short!("gov"), symbol_short!("period")),
-                voting_period,
+                (
+                    soroban_sdk::symbol_short!("Swipely"),
+                    soroban_sdk::Symbol::new(&env, "Governance"),
+                    soroban_sdk::Symbol::new(&env, "ParamChanged"),
+                    soroban_sdk::symbol_short!("sys"),
+                ),
+                ParameterChangedEvent {
+                    version: 1,
+                    event_type: GovernanceEventType::VotingPeriodChanged,
+                    new_value: voting_period,
+                },
             );
         }
 
         if old_cfg.timelock_delay != timelock_delay {
             env.events().publish(
-                (symbol_short!("gov"), symbol_short!("tlock")),
-                timelock_delay,
+                (
+                    soroban_sdk::symbol_short!("Swipely"),
+                    soroban_sdk::Symbol::new(&env, "Governance"),
+                    soroban_sdk::Symbol::new(&env, "ParamChanged"),
+                    soroban_sdk::symbol_short!("sys"),
+                ),
+                ParameterChangedEvent {
+                    version: 1,
+                    event_type: GovernanceEventType::TimelockDelayChanged,
+                    new_value: timelock_delay,
+                },
             );
         }
     }
