@@ -64,9 +64,522 @@
           "contract_data": {
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
             "key": {
+              "string": "upgrade_history"
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "string": "upgrade_history"
+                },
+                "durability": "persistent",
+                "val": {
+                  "vec": []
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
               "vec": [
                 {
-                  "symbol": "AssetHealth"
+                  "symbol": "ChkpntSnap"
+                },
+                {
+                  "u64": 1
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ChkpntSnap"
+                    },
+                    {
+                      "u64": 1
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "assets"
+                      },
+                      "val": {
+                        "vec": [
+                          {
+                            "map": [
+                              {
+                                "key": {
+                                  "symbol": "asset_code"
+                                },
+                                "val": {
+                                  "string": "USDC"
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "has_health_result"
+                                },
+                                "val": {
+                                  "bool": false
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "has_latest_price"
+                                },
+                                "val": {
+                                  "bool": false
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "health"
+                                },
+                                "val": {
+                                  "map": [
+                                    {
+                                      "key": {
+                                        "symbol": "active"
+                                      },
+                                      "val": {
+                                        "bool": true
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "asset_code"
+                                      },
+                                      "val": {
+                                        "string": "USDC"
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "bridge_uptime_score"
+                                      },
+                                      "val": {
+                                        "u32": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "expires_at"
+                                      },
+                                      "val": {
+                                        "u64": 86400
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "health_score"
+                                      },
+                                      "val": {
+                                        "u32": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "liquidity_score"
+                                      },
+                                      "val": {
+                                        "u32": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "paused"
+                                      },
+                                      "val": {
+                                        "bool": false
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "price_stability_score"
+                                      },
+                                      "val": {
+                                        "u32": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "timestamp"
+                                      },
+                                      "val": {
+                                        "u64": 0
+                                      }
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "health_result"
+                                },
+                                "val": {
+                                  "map": [
+                                    {
+                                      "key": {
+                                        "symbol": "bridge_uptime_score"
+                                      },
+                                      "val": {
+                                        "u32": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "composite_score"
+                                      },
+                                      "val": {
+                                        "u32": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "expires_at"
+                                      },
+                                      "val": {
+                                        "u64": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "liquidity_score"
+                                      },
+                                      "val": {
+                                        "u32": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "price_stability_score"
+                                      },
+                                      "val": {
+                                        "u32": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "timestamp"
+                                      },
+                                      "val": {
+                                        "u64": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "weights"
+                                      },
+                                      "val": {
+                                        "map": [
+                                          {
+                                            "key": {
+                                              "symbol": "bridge_uptime_weight"
+                                            },
+                                            "val": {
+                                              "u32": 30
+                                            }
+                                          },
+                                          {
+                                            "key": {
+                                              "symbol": "liquidity_weight"
+                                            },
+                                            "val": {
+                                              "u32": 30
+                                            }
+                                          },
+                                          {
+                                            "key": {
+                                              "symbol": "price_stability_weight"
+                                            },
+                                            "val": {
+                                              "u32": 40
+                                            }
+                                          },
+                                          {
+                                            "key": {
+                                              "symbol": "version"
+                                            },
+                                            "val": {
+                                              "u32": 1
+                                            }
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "latest_price"
+                                },
+                                "val": {
+                                  "map": [
+                                    {
+                                      "key": {
+                                        "symbol": "asset_code"
+                                      },
+                                      "val": {
+                                        "string": "USDC"
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "expires_at"
+                                      },
+                                      "val": {
+                                        "u64": 0
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "price"
+                                      },
+                                      "val": {
+                                        "i128": {
+                                          "hi": 0,
+                                          "lo": 0
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "source"
+                                      },
+                                      "val": {
+                                        "string": ""
+                                      }
+                                    },
+                                    {
+                                      "key": {
+                                        "symbol": "timestamp"
+                                      },
+                                      "val": {
+                                        "u64": 0
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "checkpoint_id"
+                      },
+                      "val": {
+                        "u64": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "created_at"
+                      },
+                      "val": {
+                        "u64": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "created_by"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "format_version"
+                      },
+                      "val": {
+                        "u32": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "health_weights"
+                      },
+                      "val": {
+                        "map": [
+                          {
+                            "key": {
+                              "symbol": "bridge_uptime_weight"
+                            },
+                            "val": {
+                              "u32": 30
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "liquidity_weight"
+                            },
+                            "val": {
+                              "u32": 30
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "price_stability_weight"
+                            },
+                            "val": {
+                              "u32": 40
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "version"
+                            },
+                            "val": {
+                              "u32": 1
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "label"
+                      },
+                      "val": {
+                        "string": "auto"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "monitored_assets"
+                      },
+                      "val": {
+                        "vec": [
+                          {
+                            "string": "USDC"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "restored_from"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
+                        "symbol": "risk_score_config"
+                      },
+                      "val": {
+                        "map": [
+                          {
+                            "key": {
+                              "symbol": "health_weight_bps"
+                            },
+                            "val": {
+                              "u32": 5000
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "max_price_deviation_bps"
+                            },
+                            "val": {
+                              "u32": 2000
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "max_volatility_bps"
+                            },
+                            "val": {
+                              "u32": 5000
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "price_weight_bps"
+                            },
+                            "val": {
+                              "u32": 2500
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "version"
+                            },
+                            "val": {
+                              "u32": 1
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "volatility_weight_bps"
+                            },
+                            "val": {
+                              "u32": 2500
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "trigger"
+                      },
+                      "val": {
+                        "vec": [
+                          {
+                            "symbol": "Automatic"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "Health"
                 },
                 {
                   "string": "USDC"
@@ -86,7 +599,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "AssetHealth"
+                      "symbol": "Health"
                     },
                     {
                       "string": "USDC"
@@ -118,6 +631,14 @@
                       },
                       "val": {
                         "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "expires_at"
+                      },
+                      "val": {
+                        "u64": 86400
                       }
                     },
                     {
@@ -173,248 +694,6 @@
         {
           "contract_data": {
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "AssetStatusRollup"
-                },
-                {
-                  "string": "USDC"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "AssetStatusRollup"
-                    },
-                    {
-                      "string": "USDC"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "map": [
-                    {
-                      "key": {
-                        "symbol": "active"
-                      },
-                      "val": {
-                        "bool": true
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "asset_code"
-                      },
-                      "val": {
-                        "string": "USDC"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "has_price_deviation_alert"
-                      },
-                      "val": {
-                        "bool": false
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "health_score"
-                      },
-                      "val": {
-                        "u32": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "paused"
-                      },
-                      "val": {
-                        "bool": false
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "price_deviation_tier"
-                      },
-                      "val": {
-                        "vec": [
-                          {
-                            "symbol": "Ok"
-                          }
-                        ]
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "tier"
-                      },
-                      "val": {
-                        "vec": [
-                          {
-                            "symbol": "High"
-                          }
-                        ]
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "timestamp"
-                      },
-                      "val": {
-                        "u64": 0
-                      }
-                    }
-                  ]
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          4095
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "ContractStatusRollup"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "ContractStatusRollup"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "map": [
-                    {
-                      "key": {
-                        "symbol": "asset_high"
-                      },
-                      "val": {
-                        "u32": 1
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "asset_low"
-                      },
-                      "val": {
-                        "u32": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "asset_medium"
-                      },
-                      "val": {
-                        "u32": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "asset_ok"
-                      },
-                      "val": {
-                        "u32": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "bridge_high"
-                      },
-                      "val": {
-                        "u32": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "bridge_low"
-                      },
-                      "val": {
-                        "u32": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "bridge_medium"
-                      },
-                      "val": {
-                        "u32": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "bridge_ok"
-                      },
-                      "val": {
-                        "u32": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "tier"
-                      },
-                      "val": {
-                        "vec": [
-                          {
-                            "symbol": "High"
-                          }
-                        ]
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "timestamp"
-                      },
-                      "val": {
-                        "u64": 0
-                      }
-                    }
-                  ]
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          4095
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
             "key": "ledger_key_contract_instance",
             "durability": "persistent"
           }
@@ -436,11 +715,7 @@
                     "storage": [
                       {
                         "key": {
-                          "vec": [
-                            {
-                              "symbol": "Admin"
-                            }
-                          ]
+                          "string": "admin"
                         },
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -448,16 +723,461 @@
                       },
                       {
                         "key": {
-                          "vec": [
+                          "string": "archived_checkpoint_meta"
+                        },
+                        "val": {
+                          "vec": []
+                        }
+                      },
+                      {
+                        "key": {
+                          "string": "checkpoint_config"
+                        },
+                        "val": {
+                          "map": [
                             {
-                              "symbol": "MonitoredAssets"
+                              "key": {
+                                "symbol": "format_version"
+                              },
+                              "val": {
+                                "u32": 1
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "interval_secs"
+                              },
+                              "val": {
+                                "u64": 86400
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "max_checkpoints"
+                              },
+                              "val": {
+                                "u32": 25
+                              }
                             }
                           ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "string": "checkpoint_counter"
+                        },
+                        "val": {
+                          "u64": 1
+                        }
+                      },
+                      {
+                        "key": {
+                          "string": "checkpoint_metadata_list"
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "map": [
+                                {
+                                  "key": {
+                                    "symbol": "asset_count"
+                                  },
+                                  "val": {
+                                    "u32": 1
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "checkpoint_id"
+                                  },
+                                  "val": {
+                                    "u64": 1
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "created_at"
+                                  },
+                                  "val": {
+                                    "u64": 0
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "created_by"
+                                  },
+                                  "val": {
+                                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "format_version"
+                                  },
+                                  "val": {
+                                    "u32": 1
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "label"
+                                  },
+                                  "val": {
+                                    "string": "auto"
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "monitored_asset_count"
+                                  },
+                                  "val": {
+                                    "u32": 1
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "restored_from"
+                                  },
+                                  "val": "void"
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "state_hash"
+                                  },
+                                  "val": {
+                                    "bytes": "606017af9bd60054644c74d583a3e58e051424b5164038a411cd4c7378a93005"
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "trigger"
+                                  },
+                                  "val": {
+                                    "vec": [
+                                      {
+                                        "symbol": "Automatic"
+                                      }
+                                    ]
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "string": "contract_version"
+                        },
+                        "val": {
+                          "u32": 1
+                        }
+                      },
+                      {
+                        "key": {
+                          "string": "last_checkpoint_at"
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "string": "last_checkpoint_id"
+                        },
+                        "val": {
+                          "u64": 1
+                        }
+                      },
+                      {
+                        "key": {
+                          "string": "monitored_assets"
                         },
                         "val": {
                           "vec": [
                             {
                               "string": "USDC"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "string": "upgrade_proposal_counter"
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "LastCleanup"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Checkpoints"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "LastCleanup"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "LiquidityHistory"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "LastCleanup"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "SupplyMismatches"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "RetPolicy"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Checkpoints"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "archive_before_delete"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "data_type"
+                              },
+                              "val": {
+                                "vec": [
+                                  {
+                                    "symbol": "Checkpoints"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "enabled"
+                              },
+                              "val": {
+                                "bool": true
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "max_deletions_per_run"
+                              },
+                              "val": {
+                                "u32": 50
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "retention_secs"
+                              },
+                              "val": {
+                                "u64": 7776000
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "trigger_interval_secs"
+                              },
+                              "val": {
+                                "u64": 3600
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "RetPolicy"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "LiquidityHistory"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "archive_before_delete"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "data_type"
+                              },
+                              "val": {
+                                "vec": [
+                                  {
+                                    "symbol": "LiquidityHistory"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "enabled"
+                              },
+                              "val": {
+                                "bool": true
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "max_deletions_per_run"
+                              },
+                              "val": {
+                                "u32": 50
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "retention_secs"
+                              },
+                              "val": {
+                                "u64": 2592000
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "trigger_interval_secs"
+                              },
+                              "val": {
+                                "u64": 3600
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "RetPolicy"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "SupplyMismatches"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "archive_before_delete"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "data_type"
+                              },
+                              "val": {
+                                "vec": [
+                                  {
+                                    "symbol": "SupplyMismatches"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "enabled"
+                              },
+                              "val": {
+                                "bool": true
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "max_deletions_per_run"
+                              },
+                              "val": {
+                                "u32": 50
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "retention_secs"
+                              },
+                              "val": {
+                                "u64": 2592000
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "trigger_interval_secs"
+                              },
+                              "val": {
+                                "u64": 3600
+                              }
                             }
                           ]
                         }
