@@ -25,6 +25,25 @@ pub struct OperatorEntry {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperatorAddedEvent {
+    pub version: u32,
+    pub operator: Address,
+    pub name: String,
+    pub added_by: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperatorRemovedEvent {
+    pub version: u32,
+    pub operator: Address,
+    pub removed_by: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OperatorRotationKey {
     Operator(Address),
     AllOperators,
@@ -97,8 +116,19 @@ pub fn add_operator(env: &Env, caller: &Address, operator_address: &Address, nam
     }
 
     env.events().publish(
-        (symbol_short!("op_add"),),
-        (operator_address.clone(), name, caller.clone(), now),
+        (
+            soroban_sdk::symbol_short!("Swipely"),
+            soroban_sdk::Symbol::new(env, "Operator"),
+            soroban_sdk::Symbol::new(env, "Added"),
+            operator_address.clone(),
+        ),
+        OperatorAddedEvent {
+            version: 1,
+            operator: operator_address.clone(),
+            name,
+            added_by: caller.clone(),
+            timestamp: now,
+        },
     );
 }
 
@@ -148,8 +178,18 @@ pub fn remove_operator(env: &Env, caller: &Address, operator_address: &Address) 
     env.storage().persistent().set(&key, &operator);
 
     env.events().publish(
-        (symbol_short!("op_rem"),),
-        (operator_address.clone(), caller.clone(), now),
+        (
+            soroban_sdk::symbol_short!("Swipely"),
+            soroban_sdk::Symbol::new(env, "Operator"),
+            soroban_sdk::Symbol::new(env, "Removed"),
+            operator_address.clone(),
+        ),
+        OperatorRemovedEvent {
+            version: 1,
+            operator: operator_address.clone(),
+            removed_by: caller.clone(),
+            timestamp: now,
+        },
     );
 }
 

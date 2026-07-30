@@ -85,6 +85,46 @@ pub struct MetricValue {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlertRuleRegisteredEvent {
+    pub version: u32,
+    pub rule_id: u64,
+    pub owner: Address,
+    pub name: String,
+    pub asset_code: String,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlertRuleUpdatedEvent {
+    pub version: u32,
+    pub rule_id: u64,
+    pub name: String,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlertRuleStateChangedEvent {
+    pub version: u32,
+    pub rule_id: u64,
+    pub is_active: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlertTriggeredEvent {
+    pub version: u32,
+    pub event_id: u64,
+    pub rule_id: u64,
+    pub asset_code: String,
+    pub alert_type: AlertType,
+    pub triggered_value: i128,
+    pub threshold: i128,
+    pub priority: AlertPriority,
+    pub timestamp: u64,
+}
+
+#[contracttype]
 pub enum DataKey {
     Admin,
     AlertRule(u64),
@@ -159,6 +199,22 @@ impl AlertSystemContract {
             .instance()
             .set(&DataKey::RuleCount, &rule_id);
 
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Alerts"),
+                soroban_sdk::Symbol::new(&env, "Registered"),
+                rule_id,
+            ),
+            AlertRuleRegisteredEvent {
+                version: 1,
+                rule_id,
+                owner,
+                name,
+                asset_code,
+            },
+        );
+
         rule_id
     }
 
@@ -187,6 +243,20 @@ impl AlertSystemContract {
         env.storage()
             .persistent()
             .set(&DataKey::AlertRule(rule_id), &rule);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Alerts"),
+                soroban_sdk::Symbol::new(&env, "Updated"),
+                rule_id,
+            ),
+            AlertRuleUpdatedEvent {
+                version: 1,
+                rule_id,
+                name: rule.name,
+            },
+        );
     }
 
     pub fn set_rule_active(env: Env, rule_id: u64, is_active: bool) {
@@ -208,6 +278,20 @@ impl AlertSystemContract {
         env.storage()
             .persistent()
             .set(&DataKey::AlertRule(rule_id), &rule);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Alerts"),
+                soroban_sdk::Symbol::new(&env, "StateChanged"),
+                rule_id,
+            ),
+            AlertRuleStateChangedEvent {
+                version: 1,
+                rule_id,
+                is_active,
+            },
+        );
     }
 
     pub fn evaluate_asset(
@@ -296,6 +380,26 @@ impl AlertSystemContract {
                 env.storage()
                     .persistent()
                     .set(&DataKey::AlertRule(rule.rule_id), &updated_rule);
+
+                env.events().publish(
+                    (
+                        soroban_sdk::symbol_short!("Swipely"),
+                        soroban_sdk::Symbol::new(&env, "Alerts"),
+                        soroban_sdk::Symbol::new(&env, "Triggered"),
+                        rule.rule_id,
+                    ),
+                    AlertTriggeredEvent {
+                        version: 1,
+                        event_id: event.event_id,
+                        rule_id: event.rule_id,
+                        asset_code: event.asset_code.clone(),
+                        alert_type: event.alert_type.clone(),
+                        triggered_value: event.triggered_value,
+                        threshold: event.threshold,
+                        priority: event.priority.clone(),
+                        timestamp: event.timestamp,
+                    },
+                );
 
                 triggered.push_back(event);
             }
@@ -500,6 +604,26 @@ impl AlertSystemContract {
                 env.storage()
                     .persistent()
                     .set(&DataKey::AlertRule(rule.rule_id), &updated_rule);
+
+                env.events().publish(
+                    (
+                        soroban_sdk::symbol_short!("Swipely"),
+                        soroban_sdk::Symbol::new(&env, "Alerts"),
+                        soroban_sdk::Symbol::new(&env, "Triggered"),
+                        rule.rule_id,
+                    ),
+                    AlertTriggeredEvent {
+                        version: 1,
+                        event_id: event.event_id,
+                        rule_id: event.rule_id,
+                        asset_code: event.asset_code.clone(),
+                        alert_type: event.alert_type.clone(),
+                        triggered_value: event.triggered_value,
+                        threshold: event.threshold,
+                        priority: event.priority.clone(),
+                        timestamp: event.timestamp,
+                    },
+                );
 
                 triggered.push_back(event);
             }

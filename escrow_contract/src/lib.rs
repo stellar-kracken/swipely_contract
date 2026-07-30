@@ -15,17 +15,103 @@ const BPS_DENOMINATOR: i128 = 10_000;
 const DEFAULT_LOCK_SECS: u64 = 3_600;
 const MAX_METADATA_LEN: u32 = 512;
 
-const EVENT_ESCROW_CREATED: Symbol = symbol_short!("esc_cre");
-const EVENT_ESCROW_CHALLENGED: Symbol = symbol_short!("esc_chl");
-const EVENT_CHALLENGE_RESOLVED: Symbol = symbol_short!("esc_res");
-const EVENT_ESCROW_RELEASED: Symbol = symbol_short!("esc_rel");
-const EVENT_ESCROW_REFUNDED: Symbol = symbol_short!("esc_ref");
-const EVENT_ESCROW_EXTENDED: Symbol = symbol_short!("esc_ext");
-const EVENT_VERIFICATION_SYNCED: Symbol = symbol_short!("esc_vrf");
-const EVENT_LOCK_CONFIG_SET: Symbol = symbol_short!("esc_lck");
-const EVENT_FEES_COLLECTED: Symbol = symbol_short!("esc_fee");
-const EVENT_EMERGENCY_RECOVERY: Symbol = symbol_short!("esc_emg");
-const EVENT_BATCH_RELEASE: Symbol = symbol_short!("esc_bat");
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowLockConfigSetEvent {
+    pub version: u32,
+    pub bridge_id: String,
+    pub asset_type: String,
+    pub lock_secs: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowCreatedEvent {
+    pub version: u32,
+    pub escrow_id: u64,
+    pub bridge_id: String,
+    pub asset_type: String,
+    pub amount: i128,
+    pub fee_total: i128,
+    pub lock_until: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationSyncedEvent {
+    pub version: u32,
+    pub escrow_id: u64,
+    pub verified: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowChallengedEvent {
+    pub version: u32,
+    pub escrow_id: u64,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeResolvedEvent {
+    pub version: u32,
+    pub escrow_id: u64,
+    pub decision_release: bool,
+    pub approvals: u32,
+    pub required_approvals: u32,
+    pub resolved: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowReleasedEvent {
+    pub version: u32,
+    pub escrow_id: u64,
+    pub release_amount: i128,
+    pub total_released: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchReleaseEvent {
+    pub version: u32,
+    pub count: u32,
+    pub total_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowRefundedEvent {
+    pub version: u32,
+    pub escrow_id: u64,
+    pub refund_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowExtendedEvent {
+    pub version: u32,
+    pub escrow_id: u64,
+    pub new_lock_until: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyRecoveryEvent {
+    pub version: u32,
+    pub escrow_id: u64,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeesCollectedEvent {
+    pub version: u32,
+    pub amount: i128,
+    pub remaining: i128,
+}
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -174,8 +260,18 @@ impl TimeLockedEscrowContract {
             &lock_secs,
         );
         env.events().publish(
-            (EVENT_LOCK_CONFIG_SET, admin),
-            (bridge_id, asset_type, lock_secs),
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "LockConfigSet"),
+                admin,
+            ),
+            EscrowLockConfigSetEvent {
+                version: 1,
+                bridge_id,
+                asset_type,
+                lock_secs,
+            },
         );
         Ok(())
     }
@@ -288,10 +384,21 @@ impl TimeLockedEscrowContract {
             .set(&DataKey::Escrow(escrow_id), &escrow);
 
         env.events().publish(
-            (EVENT_ESCROW_CREATED, depositor, recipient),
             (
-                escrow_id, bridge_id, asset_type, amount, fee_total, lock_until,
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "Created"),
+                escrow_id,
             ),
+            EscrowCreatedEvent {
+                version: 1,
+                escrow_id,
+                bridge_id,
+                asset_type,
+                amount,
+                fee_total,
+                lock_until,
+            },
         );
         Ok(escrow_id)
     }
@@ -318,8 +425,17 @@ impl TimeLockedEscrowContract {
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
         env.events().publish(
-            (EVENT_VERIFICATION_SYNCED, verifier_contract),
-            (escrow_id, verified),
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "VerificationSynced"),
+                escrow_id,
+            ),
+            VerificationSyncedEvent {
+                version: 1,
+                escrow_id,
+                verified,
+            },
         );
         Ok(())
     }
@@ -359,8 +475,17 @@ impl TimeLockedEscrowContract {
             .set(&DataKey::Challenge(escrow_id), &challenge);
 
         env.events().publish(
-            (EVENT_ESCROW_CHALLENGED, challenger),
-            (escrow_id, challenge.timestamp),
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "Challenged"),
+                escrow_id,
+            ),
+            EscrowChallengedEvent {
+                version: 1,
+                escrow_id,
+                timestamp: challenge.timestamp,
+            },
         );
         Ok(())
     }
@@ -422,14 +547,20 @@ impl TimeLockedEscrowContract {
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
         env.events().publish(
-            (EVENT_CHALLENGE_RESOLVED, approver),
             (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "ChallengeResolved"),
                 escrow_id,
-                dispute.decision_release,
-                dispute.approvals.len(),
-                dispute.required_approvals,
-                dispute.resolved,
             ),
+            ChallengeResolvedEvent {
+                version: 1,
+                escrow_id,
+                decision_release: dispute.decision_release,
+                approvals: dispute.approvals.len(),
+                required_approvals: dispute.required_approvals,
+                resolved: dispute.resolved,
+            },
         );
 
         Ok(dispute.resolved)
@@ -497,8 +628,18 @@ impl TimeLockedEscrowContract {
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
         env.events().publish(
-            (EVENT_ESCROW_RELEASED, caller),
-            (escrow_id, release_amount, escrow.released_amount),
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "Released"),
+                escrow_id,
+            ),
+            EscrowReleasedEvent {
+                version: 1,
+                escrow_id,
+                release_amount,
+                total_released: escrow.released_amount,
+            },
         );
 
         Ok(release_amount)
@@ -531,8 +672,19 @@ impl TimeLockedEscrowContract {
             total = total.saturating_add(amt);
         }
 
-        env.events()
-            .publish((EVENT_BATCH_RELEASE, caller), (escrow_ids.len(), total));
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "BatchReleased"),
+                caller.clone(),
+            ),
+            BatchReleaseEvent {
+                version: 1,
+                count: escrow_ids.len(),
+                total_amount: total,
+            },
+        );
         Ok(released)
     }
 
@@ -577,8 +729,19 @@ impl TimeLockedEscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.events()
-            .publish((EVENT_ESCROW_REFUNDED, caller), (escrow_id, refund_amount));
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "Refunded"),
+                escrow_id,
+            ),
+            EscrowRefundedEvent {
+                version: 1,
+                escrow_id,
+                refund_amount,
+            },
+        );
         Ok(refund_amount)
     }
 
@@ -606,8 +769,17 @@ impl TimeLockedEscrowContract {
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
         env.events().publish(
-            (EVENT_ESCROW_EXTENDED, admin),
-            (escrow_id, escrow.lock_until),
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "Extended"),
+                escrow_id,
+            ),
+            EscrowExtendedEvent {
+                version: 1,
+                escrow_id,
+                new_lock_until: escrow.lock_until,
+            },
         );
         Ok(escrow.lock_until)
     }
@@ -642,8 +814,18 @@ impl TimeLockedEscrowContract {
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
         env.events().publish(
-            (EVENT_EMERGENCY_RECOVERY, admin),
-            (escrow_id, recipient, amount),
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "EmergencyRecovery"),
+                escrow_id,
+            ),
+            EmergencyRecoveryEvent {
+                version: 1,
+                escrow_id,
+                recipient,
+                amount,
+            },
         );
         Ok(())
     }
@@ -675,8 +857,19 @@ impl TimeLockedEscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::AccruedFees, &remaining);
-        env.events()
-            .publish((EVENT_FEES_COLLECTED, collector), (amount, remaining));
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "FeesCollected"),
+                collector,
+            ),
+            FeesCollectedEvent {
+                version: 1,
+                amount,
+                remaining,
+            },
+        );
         Ok(amount)
     }
 

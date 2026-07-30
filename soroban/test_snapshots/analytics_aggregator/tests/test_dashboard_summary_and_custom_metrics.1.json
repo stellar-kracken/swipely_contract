@@ -1,0 +1,1041 @@
+{
+  "generators": {
+    "address": 2,
+    "nonce": 0
+  },
+  "auth": [
+    [],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "function_name": "initialize",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    []
+  ],
+  "ledger": {
+    "protocol_version": 22,
+    "sequence_number": 0,
+    "timestamp": 1000000,
+    "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
+    "base_reserve": 0,
+    "min_persistent_entry_ttl": 4096,
+    "min_temp_entry_ttl": 16,
+    "max_entry_ttl": 6312000,
+    "ledger_entries": [
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": "ledger_key_contract_instance",
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": "ledger_key_contract_instance",
+                "durability": "persistent",
+                "val": {
+                  "contract_instance": {
+                    "executable": {
+                      "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    },
+                    "storage": [
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Admin"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "CustomMetrics"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "string": "tvl_per_tx"
+                              },
+                              "val": {
+                                "string": "tvl_per_tx"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "tvl"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Daily"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 11
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 2000
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "tvl"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Hourly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 109
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 2000
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "tvl"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Monthly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 0
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 2000
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "tvl"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Weekly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 1
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 2000
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "tx_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Daily"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 11
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 50
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "tx_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Hourly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 109
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 50
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "tx_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Monthly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 0
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 50
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "tx_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Weekly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 1
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 50
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "user_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Daily"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 11
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 10
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "user_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Hourly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 109
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 10
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "user_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Monthly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 0
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 10
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "user_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Weekly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 1
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 10
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "volume"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Daily"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 11
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 300
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "volume"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Hourly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 109
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 300
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "volume"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Monthly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 0
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 300
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucket"
+                            },
+                            {
+                              "string": "volume"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Weekly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 1
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 300
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "tvl"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Daily"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 11
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 950400
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "tvl"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Hourly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 109
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 997200
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "tvl"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Monthly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 0
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "tvl"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Weekly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 1
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 604800
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "tx_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Daily"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 11
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 950400
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "tx_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Hourly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 109
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 997200
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "tx_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Monthly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 0
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "tx_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Weekly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 1
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 604800
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "user_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Daily"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 11
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 950400
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "user_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Hourly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 109
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 997200
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "user_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Monthly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 0
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "user_count"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Weekly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 1
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 604800
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "volume"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Daily"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 11
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 950400
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "volume"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Hourly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 109
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 997200
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "volume"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Monthly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 0
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "MetricBucketTimestamp"
+                            },
+                            {
+                              "string": "volume"
+                            },
+                            {
+                              "vec": [
+                                {
+                                  "symbol": "Weekly"
+                                }
+                              ]
+                            },
+                            {
+                              "u64": 1
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 604800
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "RegisteredMetrics"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "string": "tvl"
+                            },
+                            {
+                              "string": "volume"
+                            },
+                            {
+                              "string": "user_count"
+                            },
+                            {
+                              "string": "tx_count"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 801925984706572462
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 801925984706572462
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
+      [
+        {
+          "contract_code": {
+            "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_code": {
+                "ext": "v0",
+                "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "code": ""
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ]
+    ]
+  },
+  "events": []
+}
