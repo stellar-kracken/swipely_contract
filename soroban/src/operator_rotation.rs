@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Vec};
+use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::keys;
 
