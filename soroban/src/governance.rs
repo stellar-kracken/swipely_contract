@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String};
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 

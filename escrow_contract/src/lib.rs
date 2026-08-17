@@ -6,10 +6,7 @@
 // so it is silenced crate-wide here instead.
 #![allow(clippy::too_many_arguments)]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, String,
-    Symbol, Vec,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String, Vec};
 
 const BPS_DENOMINATOR: i128 = 10_000;
 const DEFAULT_LOCK_SECS: u64 = 3_600;
