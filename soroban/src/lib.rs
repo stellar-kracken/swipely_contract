@@ -136,6 +136,8 @@ mod keys {
     // Event Replay Helpers (issue #296)
     pub const EVENT_REPLAY_LOG: &str = "event_replay_log";
     pub const EVENT_REPLAY_CTR: &str = "event_replay_ctr";
+    // Submission Rate Limiting (issue #7)
+    pub const RATE_LIMIT_CONFIG: &str = "rate_limit_config";
 }
 
 #[contracttype]
@@ -896,6 +898,37 @@ pub enum ConfigDataKey {
     Entry(ConfigCategory, String),
     RetOvr(String, RetentionDataType),
     AuditLog(ConfigCategory, String),
+    RateLimit(Address),
+}
+
+/// Admin-configurable rate limit applied to submission/report entry points.
+///
+/// `window_secs` is the length of the rolling per-caller window, in seconds;
+/// `max_calls` is the maximum number of submission/report calls a single
+/// caller may make within that window. Configured via
+/// [`BridgeWatchContract::set_rate_limit_config`]. When unset, submissions
+/// are unrestricted.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateLimitConfig {
+    pub window_secs: u64,
+    pub max_calls: u32,
+}
+
+/// Per-caller rate limit usage tracked for the current rolling window.
+///
+/// Storage footprint: one persistent entry per distinct caller that has
+/// used a rate-limited entry point, keyed by `ConfigDataKey::RateLimit`.
+/// Each entry is fixed-size (an `Address` key plus a `u64` window-start and
+/// a `u32` count — well under 100 bytes) and is overwritten in place on
+/// every call rather than appended to, so ledger usage grows with the
+/// number of distinct submitting addresses, not with the number of
+/// submissions.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateLimitUsage {
+    pub window_start: u64,
+    pub count: u32,
 }
 
 #[contracttype]
@@ -1324,6 +1357,8 @@ impl BridgeWatchContract {
         price_stability_score: u32,
         bridge_uptime_score: u32,
     ) {
+        Self::enforce_rate_limit(&env, &caller);
+
         // Check if asset is locked
         Self::assert_asset_not_locked(&env, &asset_code);
 
@@ -1389,6 +1424,8 @@ impl BridgeWatchContract {
     /// see `submit_health_internal` for why `submit_health_batch_signed`
     /// needs this.
     fn submit_health_batch_internal(env: Env, caller: Address, records: Vec<HealthScoreBatch>) {
+        Self::enforce_rate_limit(&env, &caller);
+
         if records.len() > 20 {
             panic!("batch size exceeds the maximum of 20 records");
         }
@@ -1467,6 +1504,8 @@ impl BridgeWatchContract {
         price: i128,
         source: String,
     ) {
+        Self::enforce_rate_limit(&env, &caller);
+
         // Check if asset is locked
         Self::assert_asset_not_locked(&env, &asset_code);
 
@@ -2610,6 +2649,68 @@ impl BridgeWatchContract {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Submission rate limiting (issue #7)
+    // -----------------------------------------------------------------------
+
+    /// Configure the per-caller submission rate limit (admin-configurable).
+    ///
+    /// `window_secs` is the length of the rolling window; `max_calls` is the
+    /// maximum number of submission/report calls a single caller may make
+    /// within that window. Requires the `ManageConfig` permission — the
+    /// contract admin and any address holding the `SuperAdmin`/`Admin` ACL
+    /// role always qualify (see [`acl`]).
+    ///
+    /// Once configured, the limit is enforced on every submission/report
+    /// entry point: `submit_health`, `submit_health_batch`, `submit_price`
+    /// (and their `_signed` variants), `submit_calculated_health`,
+    /// `submit_health_multi_source`, `record_supply_mismatch`,
+    /// `record_liquidity_depth`, and `record_pool_state`. Before a limit is
+    /// configured, submissions are unrestricted.
+    ///
+    /// # Panics
+    /// - `caller` lacks the `ManageConfig` permission.
+    /// - `window_secs` is zero.
+    /// - `max_calls` is zero.
+    pub fn set_rate_limit_config(env: Env, caller: Address, window_secs: u64, max_calls: u32) {
+        Self::assert_can_manage_rate_limits(&env, &caller);
+
+        if window_secs == 0 {
+            panic!("rate limit window_secs must be greater than zero");
+        }
+        if max_calls == 0 {
+            panic!("rate limit max_calls must be greater than zero");
+        }
+
+        let config = RateLimitConfig {
+            window_secs,
+            max_calls,
+        };
+        env.storage()
+            .instance()
+            .set(&keys::RATE_LIMIT_CONFIG, &config);
+
+        env.events()
+            .publish((symbol_short!("rl_cfg"), caller), (window_secs, max_calls));
+    }
+
+    /// Get the current rate limit configuration, if one has been set.
+    ///
+    /// Public read access. Returns `None` when no admin has configured a
+    /// limit yet, in which case submissions are unrestricted.
+    pub fn get_rate_limit_config(env: Env) -> Option<RateLimitConfig> {
+        env.storage().instance().get(&keys::RATE_LIMIT_CONFIG)
+    }
+
+    /// Get the current rate-limit usage window for `caller`. Public read access.
+    ///
+    /// Returns `None` if the caller has never made a rate-limited call.
+    pub fn get_rate_limit_usage(env: Env, caller: Address) -> Option<RateLimitUsage> {
+        env.storage()
+            .persistent()
+            .get(&ConfigDataKey::RateLimit(caller))
+    }
+
     /// Record a supply mismatch for a bridge asset (admin only).
     ///
     /// Calculates `mismatch_bps` as
@@ -2627,6 +2728,7 @@ impl BridgeWatchContract {
         Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&keys::ADMIN).unwrap();
         admin.require_auth();
+        Self::enforce_rate_limit(&env, &admin);
 
         let mismatch_bps = if source_chain_supply > 0 {
             let diff = if stellar_supply > source_chain_supply {
@@ -2761,6 +2863,7 @@ impl BridgeWatchContract {
         Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&keys::ADMIN).unwrap();
         admin.require_auth();
+        Self::enforce_rate_limit(&env, &admin);
         let timestamp = env.ledger().timestamp();
 
         Self::validate_liquidity_depth_input(
@@ -4950,6 +5053,52 @@ impl BridgeWatchContract {
         acl::require_permission(env, caller, &admin, &Permission::ManageConfig);
     }
 
+    /// Verify that `caller` may configure the submission rate limiter.
+    fn assert_can_manage_rate_limits(env: &Env, caller: &Address) {
+        Self::assert_not_globally_paused(env);
+        Self::check_no_pending_transfer(env);
+        let admin: Address = env.storage().instance().get(&keys::ADMIN).unwrap();
+        acl::require_permission(env, caller, &admin, &Permission::ManageConfig);
+    }
+
+    /// Enforce the per-caller submission rate limit, panicking with a
+    /// descriptive error when `caller` has exceeded the configured
+    /// window/count. A no-op until an admin configures a limit via
+    /// `set_rate_limit_config`.
+    ///
+    /// Automatically resets the caller's rolling window once `window_secs`
+    /// has elapsed since the window began.
+    fn enforce_rate_limit(env: &Env, caller: &Address) {
+        let config: RateLimitConfig = match env.storage().instance().get(&keys::RATE_LIMIT_CONFIG) {
+            Some(config) => config,
+            None => return,
+        };
+
+        let now = env.ledger().timestamp();
+        let mut usage: RateLimitUsage = env
+            .storage()
+            .persistent()
+            .get(&ConfigDataKey::RateLimit(caller.clone()))
+            .unwrap_or(RateLimitUsage {
+                window_start: now,
+                count: 0,
+            });
+
+        if now >= usage.window_start + config.window_secs {
+            usage.window_start = now;
+            usage.count = 0;
+        }
+
+        if usage.count >= config.max_calls {
+            panic!("rate limit exceeded: too many submissions in the current window");
+        }
+
+        usage.count += 1;
+        env.storage()
+            .persistent()
+            .set(&ConfigDataKey::RateLimit(caller.clone()), &usage);
+    }
+
     fn validate_deviation_threshold_range(low_bps: i128, medium_bps: i128, high_bps: i128) {
         if low_bps <= 0 {
             panic!("low_bps must be greater than zero");
@@ -5657,6 +5806,7 @@ impl BridgeWatchContract {
         Self::assert_not_globally_paused(&env);
         let admin: Address = env.storage().instance().get(&keys::ADMIN).unwrap();
         admin.require_auth();
+        Self::enforce_rate_limit(&env, &admin);
 
         liquidity_pool::record_pool_state(
             &env,
@@ -5870,6 +6020,7 @@ impl BridgeWatchContract {
         manual_override: Option<u32>,
     ) {
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
+        Self::enforce_rate_limit(&env, &caller);
         let status = Self::load_asset_health(&env, &asset_code);
         Self::assert_asset_accepting_submissions(&status);
 
@@ -8507,6 +8658,7 @@ impl BridgeWatchContract {
     ) {
         Self::assert_not_globally_paused(&env);
         Self::check_permission(&env, &caller, AdminRole::HealthSubmitter);
+        Self::enforce_rate_limit(&env, &caller);
         // Verify this source is registered and trusted
         let sources: Vec<HealthSource> = env
             .storage()
@@ -10464,6 +10616,154 @@ mod tests {
 
         let usdc = String::from_str(&env, "USDC");
         client.submit_health(&stranger, &usdc, &80, &80, &80, &80);
+    }
+
+    // -----------------------------------------------------------------------
+    // Submission rate limiting (issue #7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rate_limit_unset_by_default() {
+        let (_env, client, _admin) = setup();
+        assert!(client.get_rate_limit_config().is_none());
+    }
+
+    #[test]
+    fn test_set_rate_limit_config_by_admin() {
+        let (_env, client, admin) = setup();
+        client.set_rate_limit_config(&admin, &60, &3);
+
+        let config = client.get_rate_limit_config().unwrap();
+        assert_eq!(config.window_secs, 60);
+        assert_eq!(config.max_calls, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized: caller lacks the required permission")]
+    fn test_set_rate_limit_config_requires_manage_config_permission() {
+        let (env, client, _admin) = setup();
+        let stranger = Address::generate(&env);
+        client.set_rate_limit_config(&stranger, &60, &3);
+    }
+
+    #[test]
+    #[should_panic(expected = "rate limit window_secs must be greater than zero")]
+    fn test_set_rate_limit_config_rejects_zero_window() {
+        let (_env, client, admin) = setup();
+        client.set_rate_limit_config(&admin, &0, &3);
+    }
+
+    #[test]
+    #[should_panic(expected = "rate limit max_calls must be greater than zero")]
+    fn test_set_rate_limit_config_rejects_zero_max_calls() {
+        let (_env, client, admin) = setup();
+        client.set_rate_limit_config(&admin, &60, &0);
+    }
+
+    #[test]
+    fn test_rate_limit_allows_calls_under_limit() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(1_000_000);
+        client.set_rate_limit_config(&admin, &60, &3);
+
+        let submitter = Address::generate(&env);
+        client.grant_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+
+        // Exactly `max_calls` submissions within the window must all succeed.
+        for _ in 0..3 {
+            client.submit_health(&submitter, &usdc, &80, &80, &80, &80);
+        }
+
+        let usage = client.get_rate_limit_usage(&submitter).unwrap();
+        assert_eq!(usage.count, 3);
+        assert_eq!(usage.window_start, 1_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "rate limit exceeded: too many submissions in the current window")]
+    fn test_rate_limit_rejects_calls_over_limit() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(1_000_000);
+        client.set_rate_limit_config(&admin, &60, &3);
+
+        let submitter = Address::generate(&env);
+        client.grant_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+
+        for _ in 0..3 {
+            client.submit_health(&submitter, &usdc, &80, &80, &80, &80);
+        }
+        // The 4th call within the same window must revert.
+        client.submit_health(&submitter, &usdc, &80, &80, &80, &80);
+    }
+
+    #[test]
+    fn test_rate_limit_window_resets_after_elapsed() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(1_000_000);
+        client.set_rate_limit_config(&admin, &60, &2);
+
+        let submitter = Address::generate(&env);
+        client.grant_role(&admin, &submitter, &AdminRole::HealthSubmitter);
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+
+        client.submit_health(&submitter, &usdc, &80, &80, &80, &80);
+        client.submit_health(&submitter, &usdc, &80, &80, &80, &80);
+
+        // Advance past the window — usage must reset and the call succeed.
+        env.ledger().set_timestamp(1_000_000 + 61);
+        client.submit_health(&submitter, &usdc, &80, &80, &80, &80);
+
+        let usage = client.get_rate_limit_usage(&submitter).unwrap();
+        assert_eq!(usage.count, 1);
+        assert_eq!(usage.window_start, 1_000_000 + 61);
+    }
+
+    #[test]
+    #[should_panic(expected = "rate limit exceeded: too many submissions in the current window")]
+    fn test_rate_limit_applies_to_admin_only_entry_points() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(1_000_000);
+        client.set_rate_limit_config(&admin, &60, &1);
+
+        client.record_supply_mismatch(
+            &String::from_str(&env, "bridge-1"),
+            &String::from_str(&env, "USDC"),
+            &1_000_000,
+            &1_000_000,
+        );
+        // The 2nd call within the same window must revert.
+        client.record_supply_mismatch(
+            &String::from_str(&env, "bridge-1"),
+            &String::from_str(&env, "USDC"),
+            &1_000_000,
+            &1_000_000,
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_tracks_callers_independently() {
+        let (env, client, admin) = setup();
+        env.ledger().set_timestamp(1_000_000);
+        client.set_rate_limit_config(&admin, &60, &1);
+
+        let submitter_a = Address::generate(&env);
+        let submitter_b = Address::generate(&env);
+        client.grant_role(&admin, &submitter_a, &AdminRole::HealthSubmitter);
+        client.grant_role(&admin, &submitter_b, &AdminRole::HealthSubmitter);
+        let usdc = String::from_str(&env, "USDC");
+        client.register_asset(&admin, &usdc);
+
+        // Each caller gets its own independent budget.
+        client.submit_health(&submitter_a, &usdc, &80, &80, &80, &80);
+        client.submit_health(&submitter_b, &usdc, &80, &80, &80, &80);
+
+        assert_eq!(client.get_rate_limit_usage(&submitter_a).unwrap().count, 1);
+        assert_eq!(client.get_rate_limit_usage(&submitter_b).unwrap().count, 1);
     }
 
     #[test]
