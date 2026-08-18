@@ -5,9 +5,12 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger},
     Address, Env, String,
 };
+use swipely_contracts::acl::{self, Permission};
 use swipely_contracts::operator_rotation::{
-    add_operator, get_active_operators, get_all_operators, get_operator, is_operator,
-    remove_operator,
+    add_operator, cancel_rotation, execute_rotation, get_active_operators, get_all_operators,
+    get_operator, get_pending_rotation, get_rotation_config, is_operator, propose_rotation,
+    remove_operator, set_rotation_config, RotationAction, DEFAULT_ROTATION_DELAY_SECS,
+    DEFAULT_ROTATION_GRACE_PERIOD_SECS,
 };
 
 // Minimal test contract — each env.as_contract() call creates one auth frame.
@@ -301,4 +304,192 @@ fn test_unauthorized_rotation_documented() {
     // With mock_all_auths() disabled, calling add_operator with a non-admin
     // caller would panic("only admin can manage operators"). This test documents
     // that expected behavior without triggering auth mock side effects.
+}
+
+// -----------------------------------------------------------------------
+// Timelocked rotation (issue #8)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_rotation_uses_sane_defaults_when_unconfigured() {
+    let (env, _admin, contract_id) = setup();
+    env.as_contract(&contract_id, || {
+        let config = get_rotation_config(&env);
+        assert_eq!(config.delay_secs, DEFAULT_ROTATION_DELAY_SECS);
+        assert_eq!(config.grace_period_secs, DEFAULT_ROTATION_GRACE_PERIOD_SECS);
+    });
+}
+
+#[test]
+fn test_configurable_delay_is_respected() {
+    let (env, admin, contract_id) = setup();
+    env.as_contract(&contract_id, || {
+        set_rotation_config(&env, &admin, 3_600, 7_200);
+    });
+    env.as_contract(&contract_id, || {
+        let config = get_rotation_config(&env);
+        assert_eq!(config.delay_secs, 3_600);
+        assert_eq!(config.grace_period_secs, 7_200);
+    });
+}
+
+#[test]
+fn test_propose_then_execute_add_after_delay() {
+    let (env, admin, contract_id) = setup();
+    let new_operator = Address::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        set_rotation_config(&env, &admin, 3_600, 86_400);
+    });
+    env.as_contract(&contract_id, || {
+        propose_rotation(
+            &env,
+            &admin,
+            RotationAction::Add(new_operator.clone(), String::from_str(&env, "Relay Node C")),
+        );
+    });
+    env.as_contract(&contract_id, || {
+        assert!(!is_operator(&env, &new_operator));
+    });
+
+    env.ledger().set_timestamp(1_000_000 + 3_600);
+    env.as_contract(&contract_id, || {
+        execute_rotation(&env, &admin);
+    });
+    env.as_contract(&contract_id, || {
+        assert!(is_operator(&env, &new_operator));
+        assert!(get_pending_rotation(&env).is_none());
+    });
+}
+
+#[test]
+#[should_panic(expected = "rotation delay has not elapsed")]
+fn test_execute_before_delay_elapses_reverts() {
+    let (env, admin, contract_id) = setup();
+    let new_operator = Address::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        set_rotation_config(&env, &admin, 3_600, 86_400);
+    });
+    env.as_contract(&contract_id, || {
+        propose_rotation(
+            &env,
+            &admin,
+            RotationAction::Add(new_operator.clone(), String::from_str(&env, "Relay Node C")),
+        );
+    });
+    // Still within the delay window — must revert.
+    env.as_contract(&contract_id, || {
+        execute_rotation(&env, &admin);
+    });
+}
+
+#[test]
+fn test_propose_then_execute_remove_after_delay() {
+    let (env, admin, contract_id) = setup();
+    let op1 = Address::generate(&env);
+    let op2 = Address::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        add_operator(&env, &admin, &op1, String::from_str(&env, "Op 1"));
+    });
+    env.as_contract(&contract_id, || {
+        add_operator(&env, &admin, &op2, String::from_str(&env, "Op 2"));
+    });
+    env.as_contract(&contract_id, || {
+        propose_rotation(&env, &admin, RotationAction::Remove(op1.clone()));
+    });
+
+    env.ledger()
+        .set_timestamp(1_000_000 + DEFAULT_ROTATION_DELAY_SECS);
+    env.as_contract(&contract_id, || {
+        execute_rotation(&env, &admin);
+    });
+    env.as_contract(&contract_id, || {
+        assert!(!is_operator(&env, &op1));
+        assert!(is_operator(&env, &op2));
+    });
+}
+
+#[test]
+fn test_cancel_pending_rotation_by_admin() {
+    let (env, admin, contract_id) = setup();
+    let op = Address::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        propose_rotation(
+            &env,
+            &admin,
+            RotationAction::Add(op.clone(), String::from_str(&env, "Malicious Op")),
+        );
+    });
+    env.as_contract(&contract_id, || {
+        assert!(get_pending_rotation(&env).is_some());
+        cancel_rotation(&env, &admin);
+    });
+    env.as_contract(&contract_id, || {
+        assert!(get_pending_rotation(&env).is_none());
+        assert!(!is_operator(&env, &op));
+    });
+}
+
+#[test]
+fn test_cancel_pending_rotation_by_emergency_pause_role() {
+    let (env, admin, contract_id) = setup();
+    let op = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        acl::grant_permission_internal(&env, &guardian, &Permission::EmergencyPause, &admin, 0);
+    });
+    env.as_contract(&contract_id, || {
+        propose_rotation(
+            &env,
+            &admin,
+            RotationAction::Add(op.clone(), String::from_str(&env, "Malicious Op")),
+        );
+    });
+    env.as_contract(&contract_id, || {
+        cancel_rotation(&env, &guardian);
+    });
+    env.as_contract(&contract_id, || {
+        assert!(get_pending_rotation(&env).is_none());
+    });
+}
+
+#[test]
+fn test_rotation_propose_execute_cancel_events_emitted() {
+    let (env, admin, contract_id) = setup();
+    let op1 = Address::generate(&env);
+    let op2 = Address::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        propose_rotation(
+            &env,
+            &admin,
+            RotationAction::Add(op1.clone(), String::from_str(&env, "Op 1")),
+        );
+    });
+    assert!(!env.events().all().is_empty());
+
+    env.as_contract(&contract_id, || {
+        cancel_rotation(&env, &admin);
+    });
+    assert!(!env.events().all().is_empty());
+
+    env.as_contract(&contract_id, || {
+        propose_rotation(
+            &env,
+            &admin,
+            RotationAction::Add(op2.clone(), String::from_str(&env, "Op 2")),
+        );
+    });
+    assert!(!env.events().all().is_empty());
+
+    env.ledger()
+        .set_timestamp(1_000_000 + DEFAULT_ROTATION_DELAY_SECS);
+    env.as_contract(&contract_id, || {
+        execute_rotation(&env, &admin);
+    });
+    assert!(!env.events().all().is_empty());
 }
