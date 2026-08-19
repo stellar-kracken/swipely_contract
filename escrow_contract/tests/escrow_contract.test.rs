@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use escrow_contract::{TimeLockedEscrowContract, TimeLockedEscrowContractClient};
+use escrow_contract::{EscrowError, TimeLockedEscrowContract, TimeLockedEscrowContractClient};
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
     testutils::{Address as _, Ledger},
@@ -246,4 +246,119 @@ fn emergency_recovery_requires_pause() {
 
     let esc = client.get_escrow(&escrow_id).unwrap();
     assert_eq!(esc.released_amount, 500);
+}
+
+#[test]
+fn circuit_breaker_blocks_release_and_refund_when_tripped() {
+    let (env, client, admin, _fee_collector, _a1, _a2) = setup();
+    let (verifier_id, verifier_client, verifier_admin) = verifier(&env);
+    let depositor = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    client.set_lock_period(
+        &admin,
+        &String::from_str(&env, "bridge-cb"),
+        &String::from_str(&env, "USDC"),
+        &10u64,
+    );
+
+    let escrow_id = client.create_escrow(
+        &depositor,
+        &recipient,
+        &String::from_str(&env, "bridge-cb"),
+        &String::from_str(&env, "USDC"),
+        &10_000,
+        &String::from_str(&env, "meta"),
+        &verifier_id,
+        &String::from_str(&env, "proof:cb"),
+    );
+
+    verifier_client.set_verified(&verifier_admin, &String::from_str(&env, "proof:cb"), &true);
+    client.sync_verification(&verifier_id, &escrow_id, &true);
+    env.ledger().set_timestamp(1_000_020);
+
+    assert!(!client.is_circuit_breaker_tripped());
+    client.trip_circuit_breaker(&admin, &String::from_str(&env, "suspected exploit"));
+    assert!(client.is_circuit_breaker_tripped());
+
+    match client.try_release_escrow(&recipient, &escrow_id, &5_000) {
+        Err(Ok(EscrowError::CircuitBreakerTripped)) => {}
+        _ => panic!("expected release_escrow to fail with CircuitBreakerTripped"),
+    }
+
+    let refund_result = client.try_refund_escrow(&recipient, &escrow_id);
+    assert!(refund_result.is_err());
+
+    // Read-only queries stay available while the breaker is tripped.
+    let escrow = client.get_escrow(&escrow_id).unwrap();
+    assert_eq!(escrow.released_amount, 0);
+    let state = client.get_circuit_breaker_state().unwrap();
+    assert!(state.tripped);
+    assert_eq!(state.reason, String::from_str(&env, "suspected exploit"));
+}
+
+#[test]
+fn circuit_breaker_reset_restores_release_and_refund() {
+    let (env, client, admin, _fee_collector, _a1, _a2) = setup();
+    let (verifier_id, verifier_client, verifier_admin) = verifier(&env);
+    let depositor = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    client.set_lock_period(
+        &admin,
+        &String::from_str(&env, "bridge-cb2"),
+        &String::from_str(&env, "USDC"),
+        &10u64,
+    );
+
+    let escrow_id = client.create_escrow(
+        &depositor,
+        &recipient,
+        &String::from_str(&env, "bridge-cb2"),
+        &String::from_str(&env, "USDC"),
+        &10_000,
+        &String::from_str(&env, "meta"),
+        &verifier_id,
+        &String::from_str(&env, "proof:cb2"),
+    );
+
+    verifier_client.set_verified(&verifier_admin, &String::from_str(&env, "proof:cb2"), &true);
+    client.sync_verification(&verifier_id, &escrow_id, &true);
+    env.ledger().set_timestamp(1_000_020);
+
+    client.trip_circuit_breaker(&admin, &String::from_str(&env, "investigating"));
+    assert!(client
+        .try_release_escrow(&recipient, &escrow_id, &5_000)
+        .is_err());
+
+    client.reset_circuit_breaker(&admin);
+    assert!(!client.is_circuit_breaker_tripped());
+
+    let released = client.release_escrow(&recipient, &escrow_id, &5_000);
+    assert_eq!(released, 5_000);
+}
+
+#[test]
+fn circuit_breaker_only_authorized_role_can_trip_or_reset() {
+    let (env, client, admin, _fee_collector, _a1, _a2) = setup();
+    let stranger = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    assert!(client
+        .try_trip_circuit_breaker(&stranger, &String::from_str(&env, "unauthorized"))
+        .is_err());
+
+    client.set_breaker_guardian(&admin, &guardian);
+
+    assert!(client
+        .try_trip_circuit_breaker(&stranger, &String::from_str(&env, "still unauthorized"))
+        .is_err());
+
+    client.trip_circuit_breaker(&guardian, &String::from_str(&env, "guardian trip"));
+    assert!(client.is_circuit_breaker_tripped());
+
+    assert!(client.try_reset_circuit_breaker(&stranger).is_err());
+
+    client.reset_circuit_breaker(&guardian);
+    assert!(!client.is_circuit_breaker_tripped());
 }

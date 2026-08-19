@@ -110,6 +110,23 @@ pub struct FeesCollectedEvent {
     pub remaining: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitBreakerTrippedEvent {
+    pub version: u32,
+    pub guardian: Address,
+    pub reason: String,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitBreakerResetEvent {
+    pub version: u32,
+    pub guardian: Address,
+    pub timestamp: u64,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -132,6 +149,7 @@ pub enum EscrowError {
     FeeConfigInvalid = 16,
     NothingToRelease = 17,
     NothingToRefund = 18,
+    CircuitBreakerTripped = 19,
 }
 
 #[contracttype]
@@ -182,6 +200,15 @@ pub struct DisputeResolution {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitBreakerState {
+    pub tripped: bool,
+    pub reason: String,
+    pub actor: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
 pub enum DataKey {
     Admin,
     FeeCollector,
@@ -195,6 +222,8 @@ pub enum DataKey {
     ApprovalThreshold,
     EmergencyPause,
     AccruedFees,
+    CircuitBreaker,
+    BreakerGuardian,
 }
 
 #[contract]
@@ -314,6 +343,90 @@ impl TimeLockedEscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::EmergencyPause, &paused);
+        Ok(())
+    }
+
+    /// Assigns the address authorized to trip/reset the circuit breaker
+    /// alongside the admin. Admin only.
+    pub fn set_breaker_guardian(
+        env: Env,
+        admin: Address,
+        guardian: Address,
+    ) -> Result<(), EscrowError> {
+        require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::BreakerGuardian, &guardian);
+        Ok(())
+    }
+
+    /// Trips the circuit breaker, halting `release_escrow`, `batch_release`,
+    /// and `refund_escrow` until reset. Read-only queries remain available.
+    /// Admin or the designated breaker guardian only.
+    pub fn trip_circuit_breaker(
+        env: Env,
+        caller: Address,
+        reason: String,
+    ) -> Result<(), EscrowError> {
+        require_breaker_guardian(&env, &caller)?;
+
+        let timestamp = env.ledger().timestamp();
+        let state = CircuitBreakerState {
+            tripped: true,
+            reason: reason.clone(),
+            actor: caller.clone(),
+            timestamp,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::CircuitBreaker, &state);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "BreakerTripped"),
+                caller.clone(),
+            ),
+            CircuitBreakerTrippedEvent {
+                version: 1,
+                guardian: caller,
+                reason,
+                timestamp,
+            },
+        );
+        Ok(())
+    }
+
+    /// Resets the circuit breaker, restoring release/refund paths.
+    /// Admin or the designated breaker guardian only.
+    pub fn reset_circuit_breaker(env: Env, caller: Address) -> Result<(), EscrowError> {
+        require_breaker_guardian(&env, &caller)?;
+
+        let timestamp = env.ledger().timestamp();
+        let state = CircuitBreakerState {
+            tripped: false,
+            reason: String::from_str(&env, ""),
+            actor: caller.clone(),
+            timestamp,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::CircuitBreaker, &state);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("Swipely"),
+                soroban_sdk::Symbol::new(&env, "Escrow"),
+                soroban_sdk::Symbol::new(&env, "BreakerReset"),
+                caller.clone(),
+            ),
+            CircuitBreakerResetEvent {
+                version: 1,
+                guardian: caller,
+                timestamp,
+            },
+        );
         Ok(())
     }
 
@@ -580,6 +693,7 @@ impl TimeLockedEscrowContract {
         enforce_auth: bool,
     ) -> Result<i128, EscrowError> {
         require_not_paused(&env)?;
+        require_breaker_not_tripped(&env)?;
         if enforce_auth {
             caller.require_auth();
         }
@@ -649,6 +763,7 @@ impl TimeLockedEscrowContract {
         release_amount: i128,
     ) -> Result<Vec<i128>, EscrowError> {
         require_not_paused(&env)?;
+        require_breaker_not_tripped(&env)?;
         caller.require_auth();
         if escrow_ids.is_empty() {
             return Ok(Vec::new(&env));
@@ -687,6 +802,7 @@ impl TimeLockedEscrowContract {
 
     pub fn refund_escrow(env: Env, caller: Address, escrow_id: u64) -> Result<i128, EscrowError> {
         require_not_paused(&env)?;
+        require_breaker_not_tripped(&env)?;
         caller.require_auth();
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
@@ -888,6 +1004,18 @@ impl TimeLockedEscrowContract {
             .get(&DataKey::AccruedFees)
             .unwrap_or(0)
     }
+
+    pub fn is_circuit_breaker_tripped(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::CircuitBreaker)
+            .map(|s: CircuitBreakerState| s.tripped)
+            .unwrap_or(false)
+    }
+
+    pub fn get_circuit_breaker_state(env: Env) -> Option<CircuitBreakerState> {
+        env.storage().instance().get(&DataKey::CircuitBreaker)
+    }
 }
 
 fn next_id(env: &Env) -> u64 {
@@ -925,6 +1053,33 @@ fn require_not_paused(env: &Env) -> Result<(), EscrowError> {
         .unwrap_or(false);
     if paused {
         return Err(EscrowError::EmergencyNotEnabled);
+    }
+    Ok(())
+}
+
+fn require_breaker_guardian(env: &Env, caller: &Address) -> Result<(), EscrowError> {
+    caller.require_auth();
+    let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+    let guardian: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::BreakerGuardian)
+        .unwrap_or_else(|| admin.clone());
+    if caller != &admin && caller != &guardian {
+        return Err(EscrowError::NotAuthorized);
+    }
+    Ok(())
+}
+
+fn require_breaker_not_tripped(env: &Env) -> Result<(), EscrowError> {
+    let tripped: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::CircuitBreaker)
+        .map(|s: CircuitBreakerState| s.tripped)
+        .unwrap_or(false);
+    if tripped {
+        return Err(EscrowError::CircuitBreakerTripped);
     }
     Ok(())
 }
