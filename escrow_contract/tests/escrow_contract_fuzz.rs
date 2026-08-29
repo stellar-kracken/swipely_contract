@@ -7,14 +7,19 @@
 //
 // Invariants checked: released/refunded amounts never exceed what was deposited
 // (no negative balances), a finalized escrow can never be released or refunded
-// again (no invalid state transitions), and arbitrary/edge-case input is always
-// classified into a known `EscrowError`, never an unexpected host error.
+// again (no invalid state transitions), arbitrary/edge-case input is always
+// classified into a known `EscrowError`, never an unexpected host error, and
+// (see `fuzz_release_refund_sequences_respect_circuit_breaker_and_never_double_pay`)
+// a tripped circuit breaker blocks every settlement path while leaving state
+// untouched, with no operation ever paying out twice for the same escrow.
 //
 // Iteration count is capped by default so this stays cheap in CI; set
 // FUZZ_ITERATIONS to run a longer campaign locally, e.g.:
 //   FUZZ_ITERATIONS=5000 cargo test --test escrow_contract_fuzz
 
-use escrow_contract::{EscrowError, TimeLockedEscrowContract, TimeLockedEscrowContractClient};
+use escrow_contract::{
+    EscrowError, EscrowStatus, TimeLockedEscrowContract, TimeLockedEscrowContractClient,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Env, String, Vec,
@@ -366,5 +371,212 @@ fn fuzz_batch_release_keeps_uniform_escrows_in_lockstep_without_overdraw() {
 
     println!(
         "fuzz summary: successful_batches={successful_batches}, rejected_batches={rejected_batches}"
+    );
+}
+
+// Ops per randomized round. Kept small relative to the escrow amount so a
+// round can plausibly reach a terminal (Released/Refunded) state and exercise
+// the "already finalized" guards, without every round finalizing immediately.
+const OPS_PER_ROUND: u64 = 8;
+
+#[test]
+fn fuzz_release_refund_sequences_respect_circuit_breaker_and_never_double_pay() {
+    // Fresh `Env` per round, mirroring
+    // `threshold_window_fuzz::fuzz_max_windows_cap_and_removal_keep_state_consistent`'s
+    // pattern in this workspace. This test creates a new escrow every round;
+    // `escrow_contract` keys escrows under instance storage (one footprint
+    // shared by every escrow the contract has ever created), so reusing a
+    // single `Env` across many rounds made each successive round's storage
+    // I/O cost scale with *all* escrows created so far, quadratic overall.
+    // A fresh env per round keeps each round's cost — and this test's
+    // runtime — linear in the round count, at the cost of one extra ledger
+    // snapshot file per round (same tradeoff already accepted by the
+    // pattern above). Capped independently of FUZZ_ITERATIONS, also
+    // mirroring that pattern, so this test's snapshot count and runtime
+    // stay small regardless of how high a local campaign dials the knob.
+    let rounds = fuzz_iterations().min(20);
+
+    let mut release_ok = 0_u32;
+    let mut refund_ok = 0_u32;
+    let mut breaker_blocked = 0_u32;
+
+    for round in 0..rounds {
+        let (env, client, admin, _fee_collector) = setup();
+        let depositor = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let mut rng = Rng::new(round.wrapping_add(1));
+
+        let amount: i128 = 1_000_000;
+        let escrow_id = client.create_escrow(
+            &depositor,
+            &recipient,
+            &String::from_str(&env, "bridge-seq"),
+            &String::from_str(&env, "USDC"),
+            &amount,
+            &String::from_str(&env, "meta"),
+            &verifier,
+            &String::from_str(&env, "proof"),
+        );
+        // Well past the default lock period, so every rejection below is
+        // attributable to verification/breaker/state, not the timelock.
+        env.ledger().with_mut(|li| li.timestamp += 10_000);
+
+        let releasable_total = {
+            let escrow = client.get_escrow(&escrow_id).unwrap();
+            escrow.amount - escrow.fee_total
+        };
+
+        let mut reached_released = false;
+        let mut reached_refunded = false;
+
+        for _ in 0..OPS_PER_ROUND {
+            let breaker_tripped_before = client.is_circuit_breaker_tripped();
+
+            match rng.next_u64() % 5 {
+                0 => {
+                    let verified = rng.next_u64().is_multiple_of(2);
+                    let _ = client.try_sync_verification(&verifier, &escrow_id, &verified);
+                }
+                1 => {
+                    let release_amount = rng.next_range(1, 50_000) as i128;
+                    match client.try_release_escrow(&recipient, &escrow_id, &release_amount) {
+                        Ok(Ok(released)) => {
+                            assert!(
+                                !breaker_tripped_before,
+                                "release succeeded while circuit breaker was tripped"
+                            );
+                            assert!(released > 0 && released <= releasable_total);
+                            release_ok += 1;
+                        }
+                        Err(Ok(EscrowError::CircuitBreakerTripped)) => {
+                            assert!(
+                                breaker_tripped_before,
+                                "got CircuitBreakerTripped while breaker was not tripped"
+                            );
+                            breaker_blocked += 1;
+                        }
+                        Err(Ok(_)) => {}
+                        Ok(Err(_)) | Err(Err(_)) => {
+                            panic!("unexpected host-level error on release_escrow (possible bug)")
+                        }
+                    }
+                }
+                2 => match client.try_refund_escrow(&depositor, &escrow_id) {
+                    Ok(Ok(refunded)) => {
+                        assert!(
+                            !breaker_tripped_before,
+                            "refund succeeded while circuit breaker was tripped"
+                        );
+                        assert!(refunded > 0 && refunded <= releasable_total);
+                        refund_ok += 1;
+                    }
+                    Err(Ok(EscrowError::CircuitBreakerTripped)) => {
+                        assert!(
+                            breaker_tripped_before,
+                            "got CircuitBreakerTripped while breaker was not tripped"
+                        );
+                        breaker_blocked += 1;
+                    }
+                    Err(Ok(_)) => {}
+                    Ok(Err(_)) | Err(Err(_)) => {
+                        panic!("unexpected host-level error on refund_escrow (possible bug)")
+                    }
+                },
+                3 => {
+                    let _ = client
+                        .try_trip_circuit_breaker(&admin, &String::from_str(&env, "fuzz-round"));
+                }
+                _ => {
+                    let _ = client.try_reset_circuit_breaker(&admin);
+                }
+            }
+
+            // Invariants that must hold after every single operation,
+            // regardless of which one just ran or how it was classified.
+            let escrow = client.get_escrow(&escrow_id).unwrap();
+            assert!(escrow.released_amount >= 0, "released_amount went negative");
+            assert!(
+                escrow.released_amount <= releasable_total,
+                "released_amount exceeds the releasable total (residue/over-payment bug)"
+            );
+            match escrow.status {
+                EscrowStatus::Released => {
+                    assert!(
+                        !reached_refunded,
+                        "escrow reached both Released and Refunded (double payout)"
+                    );
+                    reached_released = true;
+                    assert_eq!(
+                        escrow.released_amount, releasable_total,
+                        "status is Released but released_amount hasn't drained the full total"
+                    );
+                }
+                EscrowStatus::Refunded => {
+                    assert!(
+                        !reached_released,
+                        "escrow reached both Released and Refunded (double payout)"
+                    );
+                    reached_refunded = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        release_ok > 0,
+        "expected at least one successful release across rounds"
+    );
+    assert!(
+        refund_ok > 0,
+        "expected at least one successful refund across rounds"
+    );
+    assert!(
+        breaker_blocked > 0,
+        "expected at least one breaker-blocked settlement attempt across rounds"
+    );
+
+    // Deterministic tail: a tripped breaker must block *both* settlement
+    // paths with the specific CircuitBreakerTripped error (not just "some"
+    // error), and resetting it must restore both paths. This nails down the
+    // exact behavior the randomized loop above only samples statistically.
+    let (env, client, admin, _fee_collector) = setup();
+    let depositor = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let verifier = Address::generate(&env);
+    let escrow_id = client.create_escrow(
+        &depositor,
+        &recipient,
+        &String::from_str(&env, "bridge-tail"),
+        &String::from_str(&env, "USDC"),
+        &500_000i128,
+        &String::from_str(&env, "meta"),
+        &verifier,
+        &String::from_str(&env, "proof"),
+    );
+    client.sync_verification(&verifier, &escrow_id, &true);
+    env.ledger().with_mut(|li| li.timestamp += 10_000);
+
+    client.trip_circuit_breaker(&admin, &String::from_str(&env, "manual-tail"));
+    assert!(client.is_circuit_breaker_tripped());
+
+    match client.try_release_escrow(&recipient, &escrow_id, &1_000) {
+        Err(Ok(EscrowError::CircuitBreakerTripped)) => {}
+        other => panic!("expected CircuitBreakerTripped, got {other:?}"),
+    }
+    match client.try_refund_escrow(&depositor, &escrow_id) {
+        Err(Ok(EscrowError::CircuitBreakerTripped)) => {}
+        other => panic!("expected CircuitBreakerTripped, got {other:?}"),
+    }
+
+    client.reset_circuit_breaker(&admin);
+    assert!(!client.is_circuit_breaker_tripped());
+    assert!(client
+        .try_release_escrow(&recipient, &escrow_id, &1_000)
+        .is_ok());
+
+    println!(
+        "fuzz summary: release_ok={release_ok}, refund_ok={refund_ok}, breaker_blocked={breaker_blocked}"
     );
 }
