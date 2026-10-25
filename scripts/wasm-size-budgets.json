@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "artifacts": {
+    "escrow_contract.wasm": {
+      "baseline_bytes": 49810,
+      "budget_bytes": 55296
+    },
+    "swipely_contracts.wasm": {
+      "baseline_bytes": 369541,
+      "budget_bytes": 406528
+    },
+    "transfer_state_machine.wasm": {
+      "baseline_bytes": 18919,
+      "budget_bytes": 21504
+    }
+  }
+}
